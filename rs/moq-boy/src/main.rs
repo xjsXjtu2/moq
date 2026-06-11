@@ -1,21 +1,34 @@
 //! MoQ Boy: a crowd-controlled Game Boy Color emulator that streams over MoQ.
 //!
+//! Supports two connection modes:
+//!
+//! - **Relay mode** (`--url`): connects to a relay server; viewers also connect
+//!   via the same relay. Pause/resume is driven by per-track subscription monitoring.
+//! - **Server mode** (`--listen`): the emulator acts as a WebTransport server;
+//!   viewers connect directly. Pause/resume is driven by session count.
+//!
 //! Architecture:
 //! - **Emulator thread** (blocking): runs the Game Boy at ~59.73fps, captures
 //!   framebuffers and audio samples, publishes status JSON.
 //! - **Video encoder thread**: receives RGBA frames, converts to H.264, publishes.
 //! - **Audio encoder** (on emulator thread): resamples and encodes to Opus.
-//! - **Monitor tasks** (async): watch video/audio track subscriptions to
-//!   pause/resume the emulator when no viewers are watching.
+//! - **Monitor tasks** (async): watch video/audio track subscriptions (relay mode)
+//!   or session count (server mode) to pause/resume the emulator when no viewers
+//!   are watching.
 //! - **Viewer handler** (async): discovers viewer broadcasts, relays button
 //!   commands to the emulator.
 //!
 //! Pause/resume state machine:
 //! ```text
-//!   video_active ─┐
-//!                  ├─ both false → paused (emulation stops, condvar blocks)
-//!   audio_active ─┘
-//!                    either true → resumed (condvar notified)
+//!   relay mode:
+//!     video_active ─┐
+//!                    ├─ both false → paused (emulation stops, condvar blocks)
+//!     audio_active ─┘
+//!                      either true → resumed (condvar notified)
+//!
+//!   server mode:
+//!     session_count == 0 → paused
+//!     session_count > 0  → resumed
 //!
 //!   On resume → force video keyframe, re-anchor audio epoch
 //! ```
@@ -28,7 +41,7 @@ use bytes::Bytes;
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -46,9 +59,9 @@ mod video;
 
 #[derive(Parser, Clone)]
 pub struct Config {
-	/// Connect to the given relay URL.
-	#[arg(long)]
-	pub url: Url,
+	/// Connect to the given relay URL (relay mode). Mutually exclusive with --listen.
+	#[arg(long, conflicts_with = "server-bind")]
+	pub url: Option<Url>,
 
 	/// Path to the Game Boy ROM file.
 	#[arg(long)]
@@ -74,9 +87,14 @@ pub struct Config {
 	#[arg(long)]
 	pub location: Option<String>,
 
-	/// The MoQ client configuration.
+	/// The MoQ client configuration (used in relay mode).
 	#[command(flatten)]
 	pub client: moq_native::ClientConfig,
+
+	/// The MoQ server configuration (used in server/direct mode).
+	/// Use --listen to specify the bind address (e.g. 0.0.0.0:4443).
+	#[command(flatten)]
+	pub server: moq_native::ServerConfig,
 
 	/// The log configuration.
 	#[command(flatten)]
@@ -93,11 +111,14 @@ struct Session {
 	video_track: moq_net::TrackProducer,
 	audio_track: moq_net::TrackProducer,
 
-	/// Whether anyone is subscribed to the video/audio tracks.
+	/// Whether anyone is subscribed to the video/audio tracks (relay mode).
 	video_active: AtomicBool,
 	audio_active: AtomicBool,
 
-	/// True when no viewers are watching (both tracks unused).
+	/// Active session count (server mode only).
+	session_count: AtomicUsize,
+
+	/// True when no viewers are watching.
 	paused: AtomicBool,
 	/// Condvar to wake the emulator thread on resume.
 	resume: (Mutex<()>, Condvar),
@@ -107,7 +128,7 @@ struct Session {
 }
 
 impl Session {
-	/// Monitor a single track's subscription state.
+	/// Monitor a single track's subscription state (relay mode).
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
 	async fn run_track_monitor(&self, name: &str, track: &moq_net::TrackProducer, flag: &AtomicBool) {
 		loop {
@@ -127,7 +148,7 @@ impl Session {
 		}
 	}
 
-	/// Monitor overall pause state.
+	/// Monitor overall pause state (relay mode).
 	/// Pauses when BOTH tracks are unused, resumes when EITHER becomes used.
 	async fn run_pause_monitor(&self) {
 		loop {
@@ -152,6 +173,27 @@ impl Session {
 		// Ensure emulator thread isn't stuck waiting on resume.
 		self.paused.store(false, Ordering::Release);
 		self.resume.1.notify_all();
+	}
+
+	/// Monitor session count (server mode).
+	/// Pauses when session count drops to 0, resumes when a session connects.
+	async fn run_session_monitor(&self) {
+		loop {
+			// Wait until paused (session count == 0).
+			while self.session_count.load(Ordering::Acquire) > 0 {
+				tokio::time::sleep(Duration::from_millis(100)).await;
+			}
+			tracing::info!("pausing emulation: no connected viewers");
+			self.paused.store(true, Ordering::Release);
+
+			// Wait until a viewer connects.
+			while self.session_count.load(Ordering::Acquire) == 0 {
+				tokio::time::sleep(Duration::from_millis(100)).await;
+			}
+			tracing::info!("resuming emulation: viewer connected");
+			self.paused.store(false, Ordering::Release);
+			self.resume.1.notify_all();
+		}
 	}
 
 	/// Block the emulator thread until viewers connect.
@@ -206,13 +248,14 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
-	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
 	let mut broadcast = moq_net::Broadcast::new().produce();
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
+
+	// Determine broadcast paths.
 	let default_game_prefix = format!("{}/game", config.prefix);
 	let default_viewer_prefix = format!("{}/viewer", config.prefix);
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
@@ -221,26 +264,11 @@ async fn run(config: &Config) -> Result<()> {
 	let broadcast_path = format!("{game_prefix}/{name}");
 	publish_origin.publish_broadcast(&broadcast_path, broadcast.consume());
 
-	// Consume origin: viewer broadcasts under the viewer prefix.
-	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
 	let viewer_path = format!("{viewer_prefix}/{name}");
-	let consume_origin = moq_net::Origin::random().produce();
-	let mut viewer_consumer = consume_origin
-		.with_root(&viewer_path)
-		.expect("viewer prefix should be valid")
-		.consume();
 
-	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
-
-	let reconnect = client
-		.with_publish(publish_origin.consume())
-		.with_consume(consume_origin)
-		.reconnect(config.url.clone());
-
-	// Set up catalog and encoders.
+	// Set up catalog and encoders (shared between both modes).
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
-
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.track.clone();
@@ -254,12 +282,51 @@ async fn run(config: &Config) -> Result<()> {
 		audio_track,
 		video_active: AtomicBool::new(false),
 		audio_active: AtomicBool::new(false),
+		session_count: AtomicUsize::new(0),
 		paused: AtomicBool::new(true), // Start paused until first viewer.
 		resume: (Mutex::new(()), Condvar::new()),
 		location: config.location.clone(),
 	});
 
-	// Monitor track subscriptions.
+	if let Some(url) = &config.url {
+		run_relay_mode(config, url, &name, &broadcast_path, &viewer_path, &rom_path, session, cmd_tx, cmd_rx, audio_encoder, status_publisher, publish_origin).await
+	} else {
+		run_server_mode(config, &name, &broadcast_path, &viewer_path, &rom_path, session, cmd_tx, cmd_rx, audio_encoder, status_publisher, publish_origin).await
+	}
+}
+
+/// Relay mode: connect to a relay server, publish game data, consume viewer broadcasts.
+async fn run_relay_mode(
+	config: &Config,
+	url: &Url,
+	name: &str,
+	broadcast_path: &str,
+	viewer_path: &str,
+	rom_path: &PathBuf,
+	session: Arc<Session>,
+	cmd_tx: tokio::sync::mpsc::Sender<input::Command>,
+	cmd_rx: tokio::sync::mpsc::Receiver<input::Command>,
+	audio_encoder: audio::AudioEncoder,
+	status_publisher: status::StatusPublisher,
+	publish_origin: moq_net::OriginProducer,
+) -> Result<()> {
+	let client = config.client.clone().init()?;
+
+	// Consume origin: viewer broadcasts under the viewer prefix.
+	let consume_origin = moq_net::Origin::random().produce();
+	let mut viewer_consumer = consume_origin
+		.with_root(viewer_path)
+		.expect("viewer prefix should be valid")
+		.consume();
+
+	tracing::info!(url = %url, %name, broadcast = %broadcast_path, "connecting to relay");
+
+	let reconnect = client
+		.with_publish(publish_origin.consume())
+		.with_consume(consume_origin)
+		.reconnect(url.clone());
+
+	// Monitor track subscriptions (relay mode pause/resume).
 	let s = session.clone();
 	tokio::spawn(async move { s.run_track_monitor("video", &s.video_track, &s.video_active).await });
 
@@ -272,6 +339,7 @@ async fn run(config: &Config) -> Result<()> {
 	// Run the emulator on a blocking thread.
 	let emulator_handle = tokio::task::spawn_blocking({
 		let session = session.clone();
+		let rom_path = rom_path.clone();
 		move || run_emulator(session, &rom_path, audio_encoder, status_publisher, cmd_rx)
 	});
 
@@ -279,6 +347,109 @@ async fn run(config: &Config) -> Result<()> {
 		res = emulator_handle => res?.context("emulator error"),
 		res = reconnect.closed() => Ok(res?),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
+	}
+}
+
+/// Server (direct) mode: listen for incoming connections, each client gets game data
+/// and can publish button commands.
+async fn run_server_mode(
+	config: &Config,
+	name: &str,
+	broadcast_path: &str,
+	viewer_path: &str,
+	rom_path: &PathBuf,
+	session: Arc<Session>,
+	cmd_tx: tokio::sync::mpsc::Sender<input::Command>,
+	cmd_rx: tokio::sync::mpsc::Receiver<input::Command>,
+	audio_encoder: audio::AudioEncoder,
+	status_publisher: status::StatusPublisher,
+	publish_origin: moq_net::OriginProducer,
+) -> Result<()> {
+	let server_config = config.server.clone();
+	let mut server = server_config.init().context("failed to initialize server")?;
+
+	let addr = server.local_addr()?;
+	tracing::info!(%addr, %name, broadcast = %broadcast_path, "server listening (direct mode)");
+
+	// Configure server-level publish: all sessions see the game broadcast by default.
+	server = server.with_publish(publish_origin.consume());
+
+	// Monitor session count for pause/resume.
+	let s = session.clone();
+	tokio::spawn(async move { s.run_session_monitor().await });
+
+	// Run the emulator on a blocking thread.
+	let emulator_handle = tokio::task::spawn_blocking({
+		let session = session.clone();
+		let rom_path = rom_path.clone();
+		move || run_emulator(session, &rom_path, audio_encoder, status_publisher, cmd_rx)
+	});
+
+	// Accept loop: each JS client connection becomes a session.
+	let accept_loop = async {
+		while let Some(request) = server.accept().await {
+			let transport = request.transport();
+			tracing::info!(transport, "incoming connection");
+
+			// Per-session consume origin for receiving this viewer's button commands.
+			let viewer_origin = moq_net::Origin::random().produce();
+			let viewer_consumer = viewer_origin
+				.with_root(viewer_path)
+				.expect("viewer prefix should be valid")
+				.consume();
+
+			let cmd_tx = cmd_tx.clone();
+			let session = session.clone();
+			let game_publish = publish_origin.clone();
+
+			tokio::spawn(async move {
+				// Accept the MoQ session: publish game data, consume viewer buttons.
+				let moq_session = match request
+					.with_publish(game_publish.consume())
+					.with_consume(viewer_origin)
+					.ok()
+					.await
+				{
+					Ok(s) => s,
+					Err(e) => {
+						tracing::warn!(error = %e, "session handshake failed");
+						return;
+					}
+				};
+
+				tracing::info!(version = %moq_session.version(), transport, "session established");
+
+				session.session_count.fetch_add(1, Ordering::Release);
+				session.paused.store(false, Ordering::Release);
+				session.resume.1.notify_all();
+
+				// Handle this viewer's button commands.
+				let mut viewer_consumer = viewer_consumer;
+				let input_handle = tokio::spawn(async move {
+					if let Err(e) = input::handle_viewers(&mut viewer_consumer, &cmd_tx).await {
+						tracing::warn!(error = %e, "viewer input error");
+					}
+				});
+
+				// Wait for session to close.
+				let _ = moq_session.closed().await;
+
+				// Cleanup.
+				input_handle.abort();
+				let prev = session.session_count.fetch_sub(1, Ordering::Release);
+				if prev == 1 {
+					// Last viewer disconnected: pause.
+					session.paused.store(true, Ordering::Release);
+				}
+				tracing::info!("viewer disconnected");
+			});
+		}
+		anyhow::bail!("server stopped accepting connections")
+	};
+
+	tokio::select! {
+		res = emulator_handle => res?.context("emulator error"),
+		res = accept_loop => res,
 	}
 }
 
@@ -439,6 +610,11 @@ fn run_emulator(
 async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
+
+	// Validate: need at least one of --url or --listen (server-bind).
+	if config.url.is_none() && config.server.bind.is_none() && config.server.tls.generate.is_empty() && config.server.tls.cert.is_empty() {
+		anyhow::bail!("must specify either --url <relay-url> (relay mode) or --listen <addr> with TLS config (server/direct mode)");
+	}
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_native::jemalloc::run();
