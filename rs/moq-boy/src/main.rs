@@ -40,6 +40,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -371,6 +372,12 @@ async fn run_server_mode(
 	let addr = server.local_addr()?;
 	tracing::info!(%addr, %name, broadcast = %broadcast_path, "server listening (direct mode)");
 
+	// Start a plain HTTP server on the same port (TCP) to serve /certificate.sha256.
+	// The QUIC server uses UDP, so TCP 8443 is free for HTTP. The JS client fetches
+	// this endpoint when connecting via `http:` WebTransport.
+	let tls_info = server.tls_info();
+	tokio::spawn(serve_certificate_fingerprint(addr, tls_info));
+
 	// Configure server-level publish: all sessions see the game broadcast by default.
 	server = server.with_publish(publish_origin.consume());
 
@@ -450,6 +457,78 @@ async fn run_server_mode(
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
 		res = accept_loop => res,
+	}
+}
+
+/// Serve the TLS certificate fingerprint over plain HTTP on the same TCP port as the
+/// QUIC server (which uses UDP). This allows the JS client to fetch
+/// `/certificate.sha256` and establish an `http:` WebTransport connection.
+async fn serve_certificate_fingerprint(
+	addr: SocketAddr,
+	tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
+) -> Result<()> {
+	let listener = tokio::net::TcpListener::bind(addr)
+		.await
+		.context("failed to bind TCP for certificate HTTP server")?;
+	tracing::info!(%addr, "certificate HTTP server listening (TCP)");
+
+	loop {
+		let (mut stream, peer) = match listener.accept().await {
+			Ok(conn) => conn,
+			Err(e) => {
+				tracing::warn!(error = %e, "HTTP accept error");
+				continue;
+			}
+		};
+
+		let tls_info = tls_info.clone();
+		tokio::spawn(async move {
+			use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+			let mut buf = [0u8; 1024];
+			let n = match stream.read(&mut buf).await {
+				Ok(n) if n > 0 => n,
+				_ => return,
+			};
+
+			let request = String::from_utf8_lossy(&buf[..n]);
+			let path = request
+				.lines()
+				.next()
+				.and_then(|line| line.split_whitespace().nth(1))
+				.unwrap_or("");
+
+			let response = if path == "/certificate.sha256" {
+				let fingerprint = tls_info
+					.read()
+					.expect("tls_info lock poisoned")
+					.fingerprints
+					.first()
+					.cloned()
+					.unwrap_or_default();
+				tracing::debug!(%peer, "serving certificate fingerprint");
+				format!(
+					"HTTP/1.1 200 OK\r\n\
+					 Content-Type: text/plain\r\n\
+					 Access-Control-Allow-Origin: *\r\n\
+					 Content-Length: {}\r\n\
+					 Connection: close\r\n\
+					 \r\n\
+					 {}",
+					fingerprint.len(),
+					fingerprint
+				)
+			} else {
+				"HTTP/1.1 404 Not Found\r\n\
+				 Content-Length: 0\r\n\
+				 Connection: close\r\n\
+				 \r\n"
+					.to_string()
+			};
+
+			let _ = stream.write_all(response.as_bytes()).await;
+			let _ = stream.shutdown().await;
+		});
 	}
 }
 
