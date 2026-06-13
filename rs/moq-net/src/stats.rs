@@ -1100,6 +1100,9 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 	// and serves as the diff source for change detection across ticks.
 	let mut local: HashMap<PathOwned, EntrySnapState> = HashMap::new();
 	let mut last_payload: [Vec<u8>; NUM_SLOTS] = Default::default();
+	// Previous cumulative (frames, groups) per broadcast path (publisher slot
+	// only), used to compute per-second deltas for the periodic tracing log.
+	let mut prev_pub: HashMap<String, (u64, u64)> = HashMap::new();
 	// Same, for the session tracks: per-tier root -> change-detection state.
 	let mut session_local: [HashMap<PathOwned, SessionSlotState>; 2] = Default::default();
 	let mut session_last_payload: [Vec<u8>; 2] = Default::default();
@@ -1131,6 +1134,18 @@ async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval:
 			}
 		}
 		drop(entries);
+
+		// Log per-second publisher frame deltas (slot 0 = "publisher.json").
+		for (path, snap) in &frames[0] {
+			let (prev_f, prev_g) = prev_pub.get(path).copied().unwrap_or((0, 0));
+			let df = snap.frames.saturating_sub(prev_f);
+			let dg = snap.groups.saturating_sub(prev_g);
+			if df > 0 {
+				tracing::info!(%path, frames = df, groups = dg, "publisher sent");
+			}
+			prev_pub.insert(path.clone(), (snap.frames, snap.groups));
+		}
+		prev_pub.retain(|path, _| frames[0].contains_key(path));
 
 		// GC global entries: keep only those an external guard still holds.
 		// `strong_count == 1` (just the map's own `Arc`) means no live

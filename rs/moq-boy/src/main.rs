@@ -185,6 +185,8 @@ impl Session {
 				tokio::time::sleep(Duration::from_millis(100)).await;
 			}
 			tracing::info!("pausing emulation: no connected viewers");
+			self.video_active.store(false, Ordering::Release);
+			self.audio_active.store(false, Ordering::Release);
 			self.paused.store(true, Ordering::Release);
 
 			// Wait until a viewer connects.
@@ -192,6 +194,8 @@ impl Session {
 				tokio::time::sleep(Duration::from_millis(100)).await;
 			}
 			tracing::info!("resuming emulation: viewer connected");
+			self.video_active.store(true, Ordering::Release);
+			self.audio_active.store(true, Ordering::Release);
 			self.paused.store(false, Ordering::Release);
 			self.resume.1.notify_all();
 		}
@@ -275,6 +279,10 @@ async fn run(config: &Config) -> Result<()> {
 	let video_track = video_encoder.track.clone();
 	let audio_track = audio_encoder.track().clone();
 
+	// Grab shared counters before the encoders are moved into the session.
+	let enc_video_frames = video_encoder.frames_encoded();
+	let enc_audio_packets = audio_encoder.packets_encoded();
+
 	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
 
 	let session = Arc::new(Session {
@@ -289,10 +297,62 @@ async fn run(config: &Config) -> Result<()> {
 		location: config.location.clone(),
 	});
 
+	// Periodic encoder frame-rate log.
+	{
+		let video_cnt = enc_video_frames;
+		let audio_cnt = enc_audio_packets;
+		tokio::spawn(async move {
+			use std::sync::atomic::Ordering;
+			let mut prev_video = 0u64;
+			let mut prev_audio = 0u64;
+			let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+			loop {
+				interval.tick().await;
+				let v = video_cnt.load(Ordering::Relaxed);
+				let a = audio_cnt.load(Ordering::Relaxed);
+				let dv = v - prev_video;
+				let da = a - prev_audio;
+				prev_video = v;
+				prev_audio = a;
+				if dv > 0 || da > 0 {
+					tracing::info!(video_fps = dv, audio_fps = da, "encoder fps");
+				}
+			}
+		});
+	}
+
 	if let Some(url) = &config.url {
-		run_relay_mode(config, url, &name, &broadcast_path, &viewer_path, &rom_path, session, cmd_tx, cmd_rx, audio_encoder, status_publisher, publish_origin).await
+		run_relay_mode(
+			config,
+			url,
+			&name,
+			&broadcast_path,
+			&viewer_path,
+			&rom_path,
+			session,
+			cmd_tx,
+			cmd_rx,
+			audio_encoder,
+			status_publisher,
+			publish_origin,
+		)
+		.await
 	} else {
-		run_server_mode(config, &name, &broadcast_path, &viewer_path, &rom_path, session, cmd_tx, cmd_rx, audio_encoder, status_publisher, publish_origin).await
+		run_server_mode(
+			config,
+			&name,
+			&broadcast_path,
+			&viewer_path,
+			&rom_path,
+			session,
+			cmd_tx,
+			cmd_rx,
+			audio_encoder,
+			status_publisher,
+			publish_origin,
+		)
+		.await
 	}
 }
 
@@ -566,6 +626,14 @@ fn run_emulator(
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
+	// Periodic stats logging (once per second).
+	let mut last_log = Instant::now();
+	let mut log_cmd_count: usize = 0;
+	let mut log_cmd_details: Vec<String> = Vec::new();
+	let mut log_video_count: u64 = 0;
+	let audio_packets = audio_encoder.packets_encoded();
+	let mut log_prev_audio: u64 = audio_packets.load(Ordering::Relaxed);
+
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
 		if session.paused.load(Ordering::Acquire) {
@@ -579,6 +647,12 @@ fn run_emulator(
 			session.video_encoder.force_keyframe();
 			// Re-anchor audio timestamps so the pause gap appears in PTS.
 			audio_encoder.reset_epoch();
+			// Reset log window so the pause gap isn't counted.
+			last_log = Instant::now();
+			log_cmd_count = 0;
+			log_cmd_details.clear();
+			log_video_count = 0;
+			log_prev_audio = audio_packets.load(Ordering::Relaxed);
 		}
 
 		// Drain pending viewer commands before sleeping, so input that
@@ -588,6 +662,8 @@ fn run_emulator(
 			let encode_ms = u32::try_from(session.video_encoder.encode_duration().as_millis()).unwrap_or(u32::MAX);
 
 			while let Ok(cmd) = cmd_rx.try_recv() {
+				log_cmd_count += 1;
+				log_cmd_details.push(format!("{:?}", cmd));
 				match cmd {
 					input::Command::Buttons {
 						buttons,
@@ -663,6 +739,7 @@ fn run_emulator(
 			let ts =
 				hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
 			session.video_encoder.try_frame(rgba, ts);
+			log_video_count += 1;
 		}
 
 		// Encode and publish audio.
@@ -682,6 +759,26 @@ fn run_emulator(
 			emu.audio_samples();
 		}
 		was_audio_active = is_audio;
+
+		// Periodic stats log (once per second).
+		if last_log.elapsed() >= Duration::from_secs(1) {
+			let cur_audio = audio_packets.load(Ordering::Relaxed);
+			let audio_delta = cur_audio - log_prev_audio;
+			tracing::info!(
+				commands = log_cmd_count,
+				video_frames = log_video_count,
+				audio_frames = audio_delta,
+				"emulator stats"
+			);
+			for detail in &log_cmd_details {
+				tracing::info!(cmd = %detail, "  command detail");
+			}
+			last_log = Instant::now();
+			log_cmd_count = 0;
+			log_cmd_details.clear();
+			log_video_count = 0;
+			log_prev_audio = cur_audio;
+		}
 	}
 }
 
@@ -691,8 +788,14 @@ async fn main() -> Result<()> {
 	config.log.init()?;
 
 	// Validate: need at least one of --url or --listen (server-bind).
-	if config.url.is_none() && config.server.bind.is_none() && config.server.tls.generate.is_empty() && config.server.tls.cert.is_empty() {
-		anyhow::bail!("must specify either --url <relay-url> (relay mode) or --listen <addr> with TLS config (server/direct mode)");
+	if config.url.is_none()
+		&& config.server.bind.is_none()
+		&& config.server.tls.generate.is_empty()
+		&& config.server.tls.cert.is_empty()
+	{
+		anyhow::bail!(
+			"must specify either --url <relay-url> (relay mode) or --listen <addr> with TLS config (server/direct mode)"
+		);
 	}
 
 	#[cfg(feature = "jemalloc")]

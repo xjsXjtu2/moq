@@ -24,6 +24,8 @@ pub struct VideoEncoder {
 	force_keyframe: Arc<AtomicBool>,
 	/// Latest encode duration in microseconds.
 	encode_duration: Arc<AtomicU64>,
+	/// Total frames successfully encoded and published.
+	frames_encoded: Arc<AtomicU64>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -40,11 +42,13 @@ impl VideoEncoder {
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
+		let frames_encoded = Arc::new(AtomicU64::new(0));
 		let fk = force_keyframe.clone();
 		let ed = encode_duration.clone();
+		let fe = frames_encoded.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, fk, ed))
+			.spawn(move || encoder_thread(rx, producer, fk, ed, fe))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -52,6 +56,7 @@ impl VideoEncoder {
 			track,
 			force_keyframe,
 			encode_duration,
+			frames_encoded,
 			_thread: thread,
 		}
 	}
@@ -74,6 +79,11 @@ impl VideoEncoder {
 	pub fn encode_duration(&self) -> Duration {
 		Duration::from_micros(self.encode_duration.load(Ordering::Relaxed))
 	}
+
+	/// Shared atomic counter for the encoded frame total (for periodic logging).
+	pub(crate) fn frames_encoded(&self) -> Arc<AtomicU64> {
+		self.frames_encoded.clone()
+	}
 }
 
 fn encoder_thread(
@@ -81,6 +91,7 @@ fn encoder_thread(
 	mut producer: moq_video::encode::Producer,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
+	frames_encoded: Arc<AtomicU64>,
 ) {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
@@ -112,6 +123,7 @@ fn encoder_thread(
 					tracing::error!(error = %e, "video publish failed; stopping encoder");
 					return;
 				}
+				frames_encoded.fetch_add(1, Ordering::Relaxed);
 			}
 			// A single bad frame is tolerable; keep going.
 			Err(e) => tracing::error!(error = %e, "H.264 encode error"),

@@ -1,5 +1,8 @@
 //! Publish raw PCM as encoded audio in a moq broadcast.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use bytes::Bytes;
 
 use moq_mux::container::{Frame as MuxFrame, Timestamp};
@@ -32,6 +35,9 @@ pub struct AudioProducer {
 	/// (re)start. Emitted PTS = `epoch + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
 	epoch_us: Option<u64>,
+	/// Total encoded packets published (shared with the counter handed out via
+	/// [`packets_encoded`](Self::packets_encoded)).
+	packets_encoded: Arc<AtomicU64>,
 }
 
 impl AudioProducer {
@@ -80,6 +86,7 @@ impl AudioProducer {
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
+			packets_encoded: Arc::new(AtomicU64::new(0)),
 		})
 	}
 
@@ -91,6 +98,11 @@ impl AudioProducer {
 	/// [`used`](moq_net::TrackProducer::used) / [`unused`](moq_net::TrackProducer::unused).
 	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.track.track()
+	}
+
+	/// Total encoded packets published so far.
+	pub fn packets_encoded(&self) -> Arc<AtomicU64> {
+		self.packets_encoded.clone()
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp, dropping any
@@ -158,6 +170,7 @@ impl AudioProducer {
 		};
 		self.track.write(mux_frame)?;
 		self.track.finish_group()?;
+		self.packets_encoded.fetch_add(1, Ordering::Relaxed);
 		Ok(())
 	}
 

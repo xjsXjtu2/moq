@@ -5,6 +5,8 @@
 //! with video. `push_samples` stamps each buffer with the shared emulator
 //! clock; `reset_epoch` re-anchors on pause/resume so the gap lands in the PTS.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -41,6 +43,11 @@ impl AudioEncoder {
 
 	pub fn track(&self) -> &moq_net::TrackProducer {
 		self.producer.track()
+	}
+
+	/// Shared counter of encoded audio packets, bumped on every publish.
+	pub fn packets_encoded(&self) -> Arc<AtomicU64> {
+		self.producer.packets_encoded()
 	}
 
 	/// Re-anchor the timeline so a pause gap shows up in the audio PTS.
