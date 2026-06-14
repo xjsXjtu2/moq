@@ -285,13 +285,24 @@ async function connectWebTransport(
 		...options,
 	};
 
-	// Only perform certificate fetch and URL rewrite when polyfill is not needed
-	// This is needed because WebTransport is a butt to work with in local development.
+	// Only perform certificate fetch and URL rewrite when the relay URL is http:.
+	// This is needed because WebTransport requires https:, and we need the
+	// self-signed certificate fingerprint to establish the connection.
 	if (url.protocol === "http:") {
-		const fingerprintUrl = new URL(url);
-		fingerprintUrl.pathname = "/certificate.sha256";
-		fingerprintUrl.search = "";
-		console.warn(fingerprintUrl.toString(), "performing an insecure fingerprint fetch; use https:// in production");
+		// Build the fingerprint fetch URL:
+		// - HTTPS page: fetch via same-origin /cert-proxy/ to avoid mixed-content
+		//   blocking. The dev server (e.g. Vite) proxies this path to the relay.
+		// - HTTP page: fetch directly from the relay (insecure but works for
+		//   localhost development where WebTransport is available without HTTPS).
+		let fingerprintUrl: URL;
+		if (typeof location !== "undefined" && location.protocol === "https:") {
+			fingerprintUrl = new URL("/cert-proxy/certificate.sha256", location.href);
+		} else {
+			fingerprintUrl = new URL(url);
+			fingerprintUrl.pathname = "/certificate.sha256";
+			fingerprintUrl.search = "";
+		}
+		console.warn(fingerprintUrl.toString(), "fetching certificate fingerprint");
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.

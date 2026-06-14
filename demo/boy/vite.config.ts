@@ -1,12 +1,13 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 import solidPlugin from "vite-plugin-solid";
 import { workletInline } from "../../js/common/vite-plugin-worklet";
 
 export default defineConfig({
 	root: "src",
 	envDir: resolve(__dirname),
-	plugins: [solidPlugin(), workletInline()],
+	plugins: [solidPlugin(), workletInline(), basicSsl()],
 	build: {
 		target: "esnext",
 		rollupOptions: {
@@ -17,6 +18,15 @@ export default defineConfig({
 	},
 	server: {
 		hmr: false,
+		proxy: {
+			// Proxy certificate fingerprint requests to moq-boy's HTTP server.
+			// Avoids mixed-content blocking when the page is served over HTTPS.
+			"/cert-proxy": {
+				target: "http://localhost:4443",
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
+			},
+		},
 	},
 	optimizeDeps: {
 		exclude: ["@libav.js/variant-opus-af"],
