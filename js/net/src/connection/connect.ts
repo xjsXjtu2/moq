@@ -285,10 +285,12 @@ async function connectWebTransport(
 		...options,
 	};
 
-	// Only perform certificate fetch and URL rewrite when the relay URL is http:.
-	// This is needed because WebTransport requires https:, and we need the
-	// self-signed certificate fingerprint to establish the connection.
-	if (url.protocol === "http:") {
+	// WebTransport requires https:. For http: URLs, rewrite to https: and
+	// fetch the self-signed certificate fingerprint. For https: URLs, also
+	// attempt to fetch the fingerprint — this enables self-signed certificates
+	// when the caller passes https: directly. If the endpoint is unavailable
+	// (e.g. CA-signed relay), the connection falls back to normal TLS verification.
+	if (url.protocol === "http:" || url.protocol === "https:") {
 		// Build the fingerprint fetch URL:
 		// - HTTPS page: fetch via same-origin /cert-proxy/ to avoid mixed-content
 		//   blocking. The dev server (e.g. Vite) proxies this path to the relay.
@@ -309,18 +311,25 @@ async function connectWebTransport(
 		const fingerprint = await Promise.race([fetch(fingerprintUrl), cancel]);
 		if (!fingerprint) return undefined;
 
-		const fingerprintText = await Promise.race([fingerprint.text(), cancel]);
-		if (fingerprintText === undefined) return undefined;
+		// If the endpoint returned a valid fingerprint, use it. Otherwise
+		// (e.g. 404 from a CA-signed relay) rely on normal TLS verification.
+		if (fingerprint.ok) {
+			const fingerprintText = await Promise.race([fingerprint.text(), cancel]);
+			if (fingerprintText === undefined) return undefined;
 
-		finalOptions.serverCertificateHashes = (finalOptions.serverCertificateHashes || []).concat([
-			{
-				algorithm: "sha-256",
-				value: Hex.toBytes(fingerprintText),
-			},
-		]);
+			finalOptions.serverCertificateHashes = (finalOptions.serverCertificateHashes || []).concat([
+				{
+					algorithm: "sha-256",
+					value: Hex.toBytes(fingerprintText),
+				},
+			]);
+		}
 
-		finalUrl = new URL(url);
-		finalUrl.protocol = "https:";
+		// Rewrite http: to https: (WebTransport requirement).
+		if (url.protocol === "http:") {
+			finalUrl = new URL(url);
+			finalUrl.protocol = "https:";
+		}
 	}
 
 	const quic = new WebTransport(finalUrl, finalOptions);
