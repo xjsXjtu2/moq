@@ -173,7 +173,9 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
-		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
+		const timestamps = this.#timestamps();
+		console.info("sendCommand", cmd, "timestamps", timestamps);
+		this.#command.set({ cmd, timestamps }, true);
 	}
 
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
