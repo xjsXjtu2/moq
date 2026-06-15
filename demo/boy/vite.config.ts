@@ -18,6 +18,12 @@ export default defineConfig({
 	},
 	server: {
 		hmr: false,
+		headers: {
+			// Required for SharedArrayBuffer (used by audio worklets for low-latency audio).
+			// SharedArrayBuffer is gated behind cross-origin isolation to mitigate Spectre attacks.
+			"Cross-Origin-Opener-Policy": "same-origin",
+			"Cross-Origin-Embedder-Policy": "require-corp",
+		},
 		proxy: {
 			// Proxy certificate fingerprint requests to moq-boy's HTTP server.
 			// Avoids mixed-content blocking when the page is served over HTTPS.
