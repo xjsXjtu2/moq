@@ -630,6 +630,7 @@ fn run_emulator(
 	let mut last_log = Instant::now();
 	let mut log_cmd_count: usize = 0;
 	let mut log_cmd_details: Vec<String> = Vec::new();
+	let mut log_lat_details: Vec<String> = Vec::new();
 	let mut log_video_count: u64 = 0;
 	let audio_packets = audio_encoder.packets_encoded();
 	let mut log_prev_audio: u64 = audio_packets.load(Ordering::Relaxed);
@@ -651,6 +652,7 @@ fn run_emulator(
 			last_log = Instant::now();
 			log_cmd_count = 0;
 			log_cmd_details.clear();
+			log_lat_details.clear();
 			log_video_count = 0;
 			log_prev_audio = audio_packets.load(Ordering::Relaxed);
 		}
@@ -696,6 +698,11 @@ fn run_emulator(
 							breakdown.push(entry("input", ms_saturating(latency)));
 						}
 
+						{
+							let elapsed_ms = elapsed.as_millis();
+							let parts: Vec<String> = breakdown.iter().map(|e| format!("{}={}ms", e.label, e.ms)).collect();
+							log_lat_details.push(format!("viewer={} elapsed={}ms [{}]", viewer_id, elapsed_ms, parts.join(", ")));
+						}
 						viewer_latency.insert(viewer_id, breakdown);
 					}
 					input::Command::ViewerLeft { viewer_id } => {
@@ -771,11 +778,15 @@ fn run_emulator(
 				"emulator stats"
 			);
 			for detail in &log_cmd_details {
-				tracing::info!(cmd = %detail, "  command detail");
+				tracing::info!(cmd = %detail, "  recv command detail");
+			}
+			for detail in &log_lat_details {
+				tracing::info!(latency = %detail, "  send latency detail");
 			}
 			last_log = Instant::now();
 			log_cmd_count = 0;
 			log_cmd_details.clear();
+			log_lat_details.clear();
 			log_video_count = 0;
 			log_prev_audio = cur_audio;
 		}
