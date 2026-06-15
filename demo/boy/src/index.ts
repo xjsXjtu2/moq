@@ -12,4 +12,7 @@ if (boy && about) {
 	effect.run((inner) => {
 		about.hidden = inner.get(boy.expanded) !== undefined;
 	});
+	// Keep a reference and clean up on page unload to avoid the
+	// "Signals was garbage collected without being closed" warning.
+	window.addEventListener("beforeunload", () => effect.close());
 }

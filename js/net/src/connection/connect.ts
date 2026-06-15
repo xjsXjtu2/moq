@@ -302,7 +302,7 @@ async function connectWebTransport(
 			fingerprintUrl.pathname = "/certificate.sha256";
 			fingerprintUrl.search = "";
 		}
-		console.warn(fingerprintUrl.toString(), "fetching certificate fingerprint");
+		console.log(fingerprintUrl.toString(), "fetching certificate fingerprint");
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.

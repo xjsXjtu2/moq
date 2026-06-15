@@ -144,7 +144,28 @@ export class Decoder {
 		if (!values) return;
 		const [_, context] = values;
 
-		context.resume();
+		if (context.state === "running") {
+			// Already running (user gesture occurred before audio was enabled).
+			return;
+		}
+
+		// Browser autoplay policy: AudioContext starts in "suspended" state and
+		// can only resume after a user gesture. Register a one-time listener to
+		// resume on first interaction. If a gesture already happened between
+		// AudioContext creation and now, statechange fires immediately.
+		const onGesture = () => {
+			if (context.state === "suspended") context.resume();
+		};
+		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
+			document.addEventListener(event, onGesture, { once: true, capture: true });
+		}
+		context.addEventListener("statechange", onGesture, { once: true });
+
+		effect.cleanup(() => {
+			for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
+				document.removeEventListener(event, onGesture, { capture: true });
+			}
+		});
 
 		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 	}
