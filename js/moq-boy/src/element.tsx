@@ -4,7 +4,7 @@ import type { GameConfig } from "./index.ts";
 import { Game } from "./index.ts";
 import { BoyUI } from "./ui/element.tsx";
 
-const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
+const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer", "ts-watermark"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 const DEFAULT_PREFIX = "boy";
@@ -37,6 +37,9 @@ export default class MoqBoy extends HTMLElement {
 	readonly #viewerPrefixOverride = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
 	#dispose?: () => void;
+
+	/** When true, each game sends client_ts with commands and renders a local timestamp overlay. */
+	showTsWatermark = false;
 
 	constructor() {
 		super();
@@ -76,6 +79,9 @@ export default class MoqBoy extends HTMLElement {
 				break;
 			case "prefix-viewer":
 				this.#viewerPrefixOverride.set(newValue ?? undefined);
+				break;
+			case "ts-watermark":
+				this.showTsWatermark = newValue !== null;
 				break;
 		}
 	}
@@ -141,6 +147,7 @@ export default class MoqBoy extends HTMLElement {
 						expanded: this.expanded,
 						gamePrefix,
 						viewerPrefix,
+						showTsWatermark: this.showTsWatermark,
 					};
 					const game = new Game(config);
 					this.#sessions.set(id, game);

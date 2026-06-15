@@ -1,5 +1,5 @@
 import { Signals } from "@moq/net";
-import { createEffect, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import type { Game } from "../../index.ts";
 import { KEY_MAP } from "../../index.ts";
 import { GameUIContextProvider } from "../context";
@@ -22,9 +22,22 @@ function GameCardInner() {
 	let canvasRef!: HTMLCanvasElement;
 	const signals = new Signals.Effect();
 
+	// Timestamp watermark — updated via afterRender, rendered by SolidJS signal.
+	const [ts, setTs] = createSignal(0);
+
 	// Set canvas on the video renderer once mounted.
 	onMount(() => {
 		game.videoRenderer.canvas.set(canvasRef);
+
+		if (game.showTsWatermark) {
+			// Update a signal instead of drawing on the canvas. The SolidJS
+			// signal drives a CSS-positioned overlay, avoiding canvas
+			// save/restore, font changes, and two text draw calls per frame.
+			setTs(Math.round(performance.now()));
+			game.videoRenderer.afterRender = () => {
+				setTs(Math.round(performance.now()));
+			};
+		}
 	});
 
 	// Keyboard input — preventDefault when expanded or hovered.
@@ -75,7 +88,10 @@ function GameCardInner() {
 	signals.event(document, "keyup", onKeyUp);
 	signals.event(window, "blur", onBlur);
 
-	onCleanup(() => signals.close());
+	onCleanup(() => {
+		game.videoRenderer.afterRender = undefined;
+		signals.close();
+	});
 
 	// Label: session name + player count.
 	const label = () => {
@@ -92,19 +108,22 @@ function GameCardInner() {
 			onMouseEnter={() => game.hovered.set(true)}
 			onMouseLeave={() => game.hovered.set(false)}
 		>
-			<canvas
-				ref={canvasRef}
-				class="boy__video"
-				tabIndex={0}
-				onClick={() => game.expanded.set(game.sessionId)}
-				onKeyDown={(e) => {
-					if (e.key === " ") {
-						e.preventDefault();
-						e.stopPropagation();
-						game.expanded.set(game.sessionId);
-					}
-				}}
-			/>
+			<div class="boy__video-wrapper">
+				<canvas
+					ref={canvasRef}
+					class="boy__video"
+					tabIndex={0}
+					onClick={() => game.expanded.set(game.sessionId)}
+					onKeyDown={(e) => {
+						if (e.key === " ") {
+							e.preventDefault();
+							e.stopPropagation();
+							game.expanded.set(game.sessionId);
+						}
+					}}
+				/>
+				{game.showTsWatermark && <span class="boy__ts-watermark">{ts()}</span>}
+			</div>
 			<div class="boy__label">{label()}</div>
 			<Show when={ctx.expanded()}>
 				<div class="boy__panel boy__panel--left">

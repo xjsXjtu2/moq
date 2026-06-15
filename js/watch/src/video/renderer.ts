@@ -23,6 +23,9 @@ export class Renderer {
 	// The media timestamp of the most recently rendered frame.
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
+	// Optional callback invoked after each frame is drawn to the canvas.
+	afterRender?: (ctx: CanvasRenderingContext2D, frame: VideoFrame) => void;
+
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#visible = new Signal(false);
 	#signals = new Effect();
@@ -160,6 +163,10 @@ export class Renderer {
 
 		ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
 		ctx.restore();
+
+		if (this.afterRender) {
+			this.afterRender(ctx, frame);
+		}
 	}
 
 	// Close the track and all associated resources.

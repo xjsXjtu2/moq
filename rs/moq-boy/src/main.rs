@@ -54,6 +54,7 @@ static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::je
 mod audio;
 mod emulator;
 mod input;
+mod overlay;
 mod stats;
 mod status;
 mod video;
@@ -626,6 +627,9 @@ fn run_emulator(
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
+	// Pending client timestamp watermark to render on the next video frame.
+	let mut pending_client_ts: Option<u64> = None;
+
 	// Periodic stats logging (once per second).
 	let mut last_log = Instant::now();
 	let mut log_cmd_count: usize = 0;
@@ -671,8 +675,12 @@ fn run_emulator(
 						buttons,
 						viewer_id,
 						timestamps,
+						client_ts,
 					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
+						if let Some(ts) = client_ts {
+							pending_client_ts = Some(ts);
+						}
 
 						let mut breakdown = Vec::new();
 						let entry = |label: &str, ms: u32| status::LatencyEntry {
@@ -742,7 +750,11 @@ fn run_emulator(
 
 		// Encode and publish video frame.
 		if is_video {
-			let rgba = Bytes::from(emu.framebuffer());
+			let mut rgba = emu.framebuffer();
+			if let Some(ts) = pending_client_ts.take() {
+				overlay::draw_timestamp(&mut rgba, emulator::WIDTH, emulator::HEIGHT, ts);
+			}
+			let rgba = Bytes::from(rgba);
 			let ts =
 				hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
 			session.video_encoder.try_frame(rgba, ts);

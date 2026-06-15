@@ -21,6 +21,8 @@ export interface GameConfig {
 	gamePrefix: string;
 	/** MoQ path prefix for viewer broadcasts (e.g. "anon/boy/viewer"). */
 	viewerPrefix: string;
+	/** Show timestamp watermark on video frames and send client_ts with commands (default: false). */
+	showTsWatermark?: boolean;
 }
 
 /** A command with captured timestamps, published via the command signal. */
@@ -65,6 +67,7 @@ export class Game {
 	// Config references.
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly #viewerPrefix: string;
+	readonly showTsWatermark: boolean;
 
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
@@ -98,6 +101,7 @@ export class Game {
 		this.sessionId = sessionId;
 		this.expanded = expanded;
 		this.#viewerPrefix = viewerPrefix;
+		this.showTsWatermark = config.showTsWatermark ?? false;
 
 		// Derive active state from expanded + hovered.
 		this.#signals.run(this.#runActive.bind(this));
@@ -173,9 +177,13 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
+		const wrapped: Record<string, unknown> = { ...cmd };
+		if (this.showTsWatermark) {
+			wrapped.client_ts = Math.round(performance.now());
+		}
 		const timestamps = this.#timestamps();
-		console.info("sendCommand", cmd, "timestamps", timestamps);
-		this.#command.set({ cmd, timestamps }, true);
+		console.debug("sendCommand", wrapped, "timestamps", timestamps);
+		this.#command.set({ cmd: wrapped, timestamps }, true);
 	}
 
 	/** Collect media timestamps at each pipeline stage for latency measurement. */

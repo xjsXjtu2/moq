@@ -1,5 +1,7 @@
 .boy__card {
 	position: relative;
+	display: flex;
+	flex-direction: column;
 	background: var(--boy-bg-card);
 	border: 1px solid var(--boy-border);
 	border-radius: var(--spacing-8);
@@ -31,6 +33,13 @@
 	display: none;
 }
 
+/* Video wrapper — containing block for watermark overlay */
+.boy__video-wrapper {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+}
+
 /* Video canvas */
 .boy__video {
 	width: 100%;
@@ -46,7 +55,8 @@
 	outline-offset: -2px;
 }
 
-.boy__card--expanded .boy__video {
+/* Expanded: wrapper is a flex child with size constraints */
+.boy__card--expanded .boy__video-wrapper {
 	flex: 1;
 	min-width: 0;
 	max-width: 640px;
@@ -65,6 +75,20 @@
 	border-radius: var(--spacing-4);
 	font-family: monospace;
 	font-size: 0.7rem;
+}
+
+/* Timestamp watermark overlay */
+.boy__ts-watermark {
+	position: absolute;
+	z-index: 1;
+	bottom: var(--spacing-8);
+	left: var(--spacing-8);
+	background: var(--color-black-alpha-70);
+	color: var(--color-white);
+	padding: var(--spacing-2) var(--spacing-8);
+	border-radius: var(--spacing-4);
+	font-family: monospace;
+	font-size: 1.5rem;
 }
 
 /* Side panels (expanded only) */
@@ -91,7 +115,7 @@
 		overflow-y: auto;
 	}
 
-	.boy__card--expanded .boy__video {
+	.boy__card--expanded .boy__video-wrapper {
 		max-width: 100%;
 		max-height: none;
 	}

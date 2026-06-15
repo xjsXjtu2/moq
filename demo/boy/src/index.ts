@@ -4,7 +4,10 @@ import { Effect } from "@moq/signals";
 const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443/anon";
 
 const boy = document.querySelector("moq-boy");
-if (boy) boy.url = url;
+if (boy) {
+	boy.url = url;
+	boy.showTsWatermark = new URLSearchParams(location.search).has("ts-watermark");
+}
 
 const about = document.getElementById("about");
 if (boy && about) {

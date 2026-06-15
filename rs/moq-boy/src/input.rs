@@ -37,6 +37,9 @@ enum RawCommand {
 		/// Ordered media timestamps at each pipeline stage.
 		#[serde(default)]
 		timestamps: Vec<RawTimestamp>,
+		/// Client-side timestamp in milliseconds (since page load), for watermark overlay.
+		#[serde(default)]
+		client_ts: Option<u64>,
 	},
 	#[serde(rename = "reset")]
 	Reset {},
@@ -51,6 +54,8 @@ pub enum Command {
 		viewer_id: String,
 		/// Ordered media timestamps at each pipeline stage.
 		timestamps: Vec<TimestampEntry>,
+		/// Client-side timestamp in milliseconds (since page load), for watermark overlay.
+		client_ts: Option<u64>,
 	},
 	Reset,
 	/// A viewer disconnected or went offline.
@@ -110,7 +115,11 @@ async fn handle_viewer_commands(
 		while let Some(frame) = group.read_frame().await? {
 			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
 			match serde_json::from_str::<RawCommand>(text) {
-				Ok(RawCommand::Buttons { buttons, timestamps }) => {
+				Ok(RawCommand::Buttons {
+					buttons,
+					timestamps,
+					client_ts,
+				}) => {
 					let timestamps: Vec<_> = timestamps
 						.into_iter()
 						.filter_map(|t| {
@@ -123,6 +132,7 @@ async fn handle_viewer_commands(
 							buttons,
 							viewer_id: viewer_id.to_string(),
 							timestamps,
+							client_ts,
 						})
 						.await;
 				}
