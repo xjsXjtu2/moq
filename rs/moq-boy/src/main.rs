@@ -306,7 +306,7 @@ async fn run(config: &Config) -> Result<()> {
 			use std::sync::atomic::Ordering;
 			let mut prev_video = 0u64;
 			let mut prev_audio = 0u64;
-			let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+			let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 			loop {
 				interval.tick().await;
@@ -630,7 +630,7 @@ fn run_emulator(
 	// Pending client timestamp watermark to render on the next video frame.
 	let mut pending_client_ts: Option<u64> = None;
 
-	// Periodic stats logging (once per second).
+	// Periodic stats logging (every 5 seconds).
 	let mut last_log = Instant::now();
 	let mut log_cmd_count: usize = 0;
 	let mut log_cmd_details: Vec<String> = Vec::new();
@@ -779,8 +779,8 @@ fn run_emulator(
 		}
 		was_audio_active = is_audio;
 
-		// Periodic stats log (once per second).
-		if last_log.elapsed() >= Duration::from_secs(1) {
+		// Periodic stats log (every 5 seconds).
+		if last_log.elapsed() >= Duration::from_secs(5) {
 			let cur_audio = audio_packets.load(Ordering::Relaxed);
 			let audio_delta = cur_audio - log_prev_audio;
 			tracing::info!(
@@ -790,10 +790,10 @@ fn run_emulator(
 				"emulator stats"
 			);
 			for detail in &log_cmd_details {
-				tracing::info!(cmd = %detail, "  recv command detail");
+				tracing::debug!(cmd = %detail, "  recv command detail");
 			}
 			for detail in &log_lat_details {
-				tracing::info!(latency = %detail, "  send latency detail");
+				tracing::debug!(latency = %detail, "  send latency detail");
 			}
 			last_log = Instant::now();
 			log_cmd_count = 0;
