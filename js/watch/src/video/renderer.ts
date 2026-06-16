@@ -113,32 +113,25 @@ export class Renderer {
 
 		const frame = effect.get(this.decoder.frame);
 
-		// Request a callback to render the frame based on the monitor's refresh rate.
-		// Always render, even when paused (to show last frame).
-		let animate: number | undefined = requestAnimationFrame(() => {
-			this.#render(ctx, frame);
+		// Render immediately without rAF — the decoder has already sync.wait'd
+		// this frame to its correct presentation time, so we want to paint it
+		// as soon as possible. The browser compositor will pick up the canvas
+		// at the next vsync.
+		this.#render(ctx, frame);
 
-			if (frame) {
-				this.frame.update((current) => {
-					current?.close();
-					return frame.clone();
-				});
-				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
-			} else {
-				this.frame.update((current) => {
-					current?.close();
-					return undefined;
-				});
-				this.timestamp.set(undefined);
-			}
-
-			animate = undefined;
-		});
-
-		// Clean up any pending animation request.
-		effect.cleanup(() => {
-			if (animate) cancelAnimationFrame(animate);
-		});
+		if (frame) {
+			this.frame.update((current: VideoFrame | undefined) => {
+				current?.close();
+				return frame.clone();
+			});
+			this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+		} else {
+			this.frame.update((current: VideoFrame | undefined) => {
+				current?.close();
+				return undefined;
+			});
+			this.timestamp.set(undefined);
+		}
 	}
 
 	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
