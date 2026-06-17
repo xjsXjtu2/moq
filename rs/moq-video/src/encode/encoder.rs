@@ -97,6 +97,8 @@ pub struct Encoder {
 	frame_count: i64,
 	/// The ffmpeg encoder name that opened successfully (for logging).
 	name: String,
+	/// Total number of keyframes emitted.
+	keyframe_count: u64,
 }
 
 struct Scaler {
@@ -139,6 +141,7 @@ impl Encoder {
 						height: config.height,
 						frame_count: 0,
 						name: name.clone(),
+						keyframe_count: 0,
 					});
 				}
 				Err(e) => {
@@ -153,6 +156,11 @@ impl Encoder {
 	/// The ffmpeg encoder name in use, e.g. `"h264_videotoolbox"`.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Total number of keyframes emitted by the encoder.
+	pub fn keyframe_count(&self) -> u64 {
+		self.keyframe_count
 	}
 
 	/// Encode one tightly-packed RGBA frame (`width * height * 4` bytes),
@@ -191,6 +199,9 @@ impl Encoder {
 		loop {
 			match self.encoder.receive_packet(&mut packet) {
 				Ok(()) => {
+					if packet.is_key() {
+						self.keyframe_count += 1;
+					}
 					if let Some(data) = packet.data() {
 						out.push(Bytes::copy_from_slice(data));
 					}
@@ -294,7 +305,7 @@ fn open_encoder(name: &str, config: &Config) -> Result<ffmpeg::encoder::video::E
 		None => config.resolved_bitrate() as usize,
 	};
 	enc.set_bit_rate(bps);
-	tracing::info!(bps, "open encoder bitrate");
+	tracing::info!(kbps=bps/1000, gop=config.gop, "open encoder bitrate");
 
 	let mut opts = ffmpeg::Dictionary::new();
 	if name == "libx264" {

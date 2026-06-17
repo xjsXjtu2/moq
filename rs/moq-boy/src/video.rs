@@ -45,6 +45,8 @@ pub struct VideoEncoder {
 	frames_encoded: Arc<AtomicU64>,
 	/// Total bytes of encoded H.264 packets.
 	bytes_encoded: Arc<AtomicU64>,
+	/// Total keyframes emitted.
+	keyframes_encoded: Arc<AtomicU64>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -67,13 +69,15 @@ impl VideoEncoder {
 		let encode_duration = Arc::new(AtomicU64::new(0));
 		let frames_encoded = Arc::new(AtomicU64::new(0));
 		let bytes_encoded = Arc::new(AtomicU64::new(0));
+		let keyframes_encoded = Arc::new(AtomicU64::new(0));
 		let fk = force_keyframe.clone();
 		let ed = encode_duration.clone();
 		let fe = frames_encoded.clone();
 		let be = bytes_encoded.clone();
+		let ke = keyframes_encoded.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, enc, fk, ed, fe, be))
+			.spawn(move || encoder_thread(rx, producer, enc, fk, ed, fe, be, ke))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -83,6 +87,7 @@ impl VideoEncoder {
 			encode_duration,
 			frames_encoded,
 			bytes_encoded,
+			keyframes_encoded,
 			_thread: thread,
 		}
 	}
@@ -115,6 +120,11 @@ impl VideoEncoder {
 	pub(crate) fn bytes_encoded(&self) -> Arc<AtomicU64> {
 		self.bytes_encoded.clone()
 	}
+
+	/// Shared atomic counter for the keyframe total (for periodic logging).
+	pub(crate) fn keyframes_encoded(&self) -> Arc<AtomicU64> {
+		self.keyframes_encoded.clone()
+	}
 }
 
 fn encoder_thread(
@@ -125,6 +135,7 @@ fn encoder_thread(
 	encode_duration: Arc<AtomicU64>,
 	frames_encoded: Arc<AtomicU64>,
 	bytes_encoded: Arc<AtomicU64>,
+	keyframes_encoded: Arc<AtomicU64>,
 ) {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
@@ -147,7 +158,7 @@ fn encoder_thread(
 			}
 		};
 
-		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
+		let keyframe: bool = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
 		match e.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
 			Ok(packets) => {
@@ -160,6 +171,7 @@ fn encoder_thread(
 				}
 				frames_encoded.fetch_add(1, Ordering::Relaxed);
 				bytes_encoded.fetch_add(byte_count, Ordering::Relaxed);
+				keyframes_encoded.store(e.keyframe_count(), Ordering::Relaxed);
 			}
 			// A single bad frame is tolerable; keep going.
 			Err(e) => tracing::error!(error = %e, "H.264 encode error"),

@@ -296,6 +296,7 @@ async fn run(config: &Config) -> Result<()> {
 	// Grab shared counters before the encoders are moved into the session.
 	let enc_video_frames = video_encoder.frames_encoded();
 	let enc_video_bytes = video_encoder.bytes_encoded();
+	let enc_video_keyframes = video_encoder.keyframes_encoded();
 	let enc_audio_packets = audio_encoder.packets_encoded();
 
 	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
@@ -316,11 +317,13 @@ async fn run(config: &Config) -> Result<()> {
 	{
 		let video_cnt = enc_video_frames;
 		let bytes_cnt = enc_video_bytes;
+		let keyframe_cnt = enc_video_keyframes;
 		let audio_cnt = enc_audio_packets;
 		tokio::spawn(async move {
 			use std::sync::atomic::Ordering;
 			let mut prev_video = 0u64;
 			let mut prev_bytes = 0u64;
+			let mut prev_keyframes = 0u64;
 			let mut prev_audio = 0u64;
 			let intv = 5;
 			let mut interval = tokio::time::interval(std::time::Duration::from_secs(intv));
@@ -329,15 +332,18 @@ async fn run(config: &Config) -> Result<()> {
 				interval.tick().await;
 				let v = video_cnt.load(Ordering::Relaxed);
 				let b = bytes_cnt.load(Ordering::Relaxed);
+				let k = keyframe_cnt.load(Ordering::Relaxed);
 				let a = audio_cnt.load(Ordering::Relaxed);
+				let dk = k - prev_keyframes;
 				let dv = (v - prev_video) / intv;
 				let db = ((b - prev_bytes) * 8 / 1000) / intv;
 				let da = (a - prev_audio) / intv;
 				prev_video = v;
 				prev_bytes = b;
+				prev_keyframes = k;
 				prev_audio = a;
 				if dv > 0 || da > 0 {
-					tracing::info!(vfps = dv, v_kbps = db, afps = da, "enc ");
+					tracing::info!(vfps = dv, v_kbps = db, afps = da, ifrms = dk, "enc ");
 				}
 			}
 		});
