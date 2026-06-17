@@ -1,12 +1,15 @@
 import "@moq/boy/element";
 import { Effect } from "@moq/signals";
 
-const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443/anon";
+// Priority: ?url= query param > VITE_RELAY_URL env var > default localhost
+const params = new URLSearchParams(location.search);
+const url = params.get("url") ?? import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443/anon";
 
 const boy = document.querySelector("moq-boy");
 if (boy) {
 	boy.url = url;
-	boy.showTsWatermark = new URLSearchParams(location.search).has("ts-watermark");
+	boy.showTsWatermark = params.has("ts-watermark");
+	console.log(`url=${boy.url}, showTsWatermark=${boy.showTsWatermark}`)
 }
 
 const about = document.getElementById("about");
