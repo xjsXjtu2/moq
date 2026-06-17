@@ -101,6 +101,15 @@ pub struct Config {
 	/// The log configuration.
 	#[command(flatten)]
 	pub log: moq_native::Log,
+
+	/// Output framerate (e.g. 30, 60). Defaults to 60.
+	#[arg(long, short = 'f', default_value = "60")]
+	pub framerate: u32,
+
+	/// Target video bitrate in kbps (e.g. 1000 for 1 Mbps). Defaults to
+	/// auto (encoder derives a sane value from resolution and framerate).
+	#[arg(long, short = 'b')]
+	pub bitrate: Option<u64>,
 }
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
@@ -274,7 +283,11 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Set up catalog and encoders (shared between both modes).
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
+	let enc_config = video::EncoderConfig {
+		framerate: config.framerate,
+		bitrate: config.bitrate.map(|kbps| kbps * 1000),
+	};
+	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone(), enc_config);
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.track.clone();
@@ -282,6 +295,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Grab shared counters before the encoders are moved into the session.
 	let enc_video_frames = video_encoder.frames_encoded();
+	let enc_video_bytes = video_encoder.bytes_encoded();
 	let enc_audio_packets = audio_encoder.packets_encoded();
 
 	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
@@ -301,23 +315,29 @@ async fn run(config: &Config) -> Result<()> {
 	// Periodic encoder frame-rate log.
 	{
 		let video_cnt = enc_video_frames;
+		let bytes_cnt = enc_video_bytes;
 		let audio_cnt = enc_audio_packets;
 		tokio::spawn(async move {
 			use std::sync::atomic::Ordering;
 			let mut prev_video = 0u64;
+			let mut prev_bytes = 0u64;
 			let mut prev_audio = 0u64;
-			let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+			let intv = 5;
+			let mut interval = tokio::time::interval(std::time::Duration::from_secs(intv));
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 			loop {
 				interval.tick().await;
 				let v = video_cnt.load(Ordering::Relaxed);
+				let b = bytes_cnt.load(Ordering::Relaxed);
 				let a = audio_cnt.load(Ordering::Relaxed);
-				let dv = v - prev_video;
-				let da = a - prev_audio;
+				let dv = (v - prev_video) / intv;
+				let db = ((b - prev_bytes) * 8 / 1000) / intv;
+				let da = (a - prev_audio) / intv;
 				prev_video = v;
+				prev_bytes = b;
 				prev_audio = a;
 				if dv > 0 || da > 0 {
-					tracing::info!(video_fps = dv, audio_fps = da, "encoder fps");
+					tracing::info!(vfps = dv, v_kbps = db, afps = da, "enc ");
 				}
 			}
 		});
@@ -784,10 +804,10 @@ fn run_emulator(
 			let cur_audio = audio_packets.load(Ordering::Relaxed);
 			let audio_delta = cur_audio - log_prev_audio;
 			tracing::info!(
-				commands = log_cmd_count,
-				video_frames = log_video_count,
-				audio_frames = audio_delta,
-				"emulator stats"
+				cmds = log_cmd_count,
+				vfrms = log_video_count,
+				afrms = audio_delta,
+				"emulator cap"
 			);
 			for detail in &log_cmd_details {
 				tracing::debug!(cmd = %detail, "  recv command detail");

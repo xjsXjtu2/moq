@@ -289,7 +289,12 @@ fn open_encoder(name: &str, config: &Config) -> Result<ffmpeg::encoder::video::E
 	enc.set_frame_rate(Some(ffmpeg::Rational::new(config.framerate as i32, 1)));
 	enc.set_gop(config.gop);
 	enc.set_max_b_frames(0); // Low latency: no reordering.
-	enc.set_bit_rate(config.resolved_bitrate() as usize);
+	let bps = match config.bitrate {
+		Some(b) => b as usize,
+		None => config.resolved_bitrate() as usize,
+	};
+	enc.set_bit_rate(bps);
+	tracing::info!(bps, "open encoder bitrate");
 
 	let mut opts = ffmpeg::Dictionary::new();
 	if name == "libx264" {

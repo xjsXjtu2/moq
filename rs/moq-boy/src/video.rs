@@ -14,6 +14,23 @@ use bytes::Bytes;
 
 use crate::emulator::{HEIGHT, WIDTH};
 
+/// Encoder configuration passed from the CLI.
+#[derive(Clone, Debug)]
+pub struct EncoderConfig {
+	pub framerate: u32,
+	/// Target bitrate in bits per second. None = auto.
+	pub bitrate: Option<u64>,
+}
+
+impl Default for EncoderConfig {
+	fn default() -> Self {
+		Self {
+			framerate: 60,
+			bitrate: None,
+		}
+	}
+}
+
 /// Handle to the video encoding thread.
 ///
 /// Frames are submitted via `try_frame()` (non-blocking, drops if full).
@@ -26,6 +43,8 @@ pub struct VideoEncoder {
 	encode_duration: Arc<AtomicU64>,
 	/// Total frames successfully encoded and published.
 	frames_encoded: Arc<AtomicU64>,
+	/// Total bytes of encoded H.264 packets.
+	bytes_encoded: Arc<AtomicU64>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -35,7 +54,11 @@ struct EncoderMsg {
 }
 
 impl VideoEncoder {
-	pub fn spawn(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Self {
+	pub fn spawn(
+		broadcast: moq_net::BroadcastProducer,
+		catalog: moq_mux::catalog::Producer,
+		enc: EncoderConfig,
+	) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let producer = moq_video::encode::Producer::new(broadcast, catalog).expect("failed to create avc3 producer");
 		let track = producer.track().expect("avc3 track is eagerly created").clone();
@@ -43,12 +66,14 @@ impl VideoEncoder {
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
 		let frames_encoded = Arc::new(AtomicU64::new(0));
+		let bytes_encoded = Arc::new(AtomicU64::new(0));
 		let fk = force_keyframe.clone();
 		let ed = encode_duration.clone();
 		let fe = frames_encoded.clone();
+		let be = bytes_encoded.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, fk, ed, fe))
+			.spawn(move || encoder_thread(rx, producer, enc, fk, ed, fe, be))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -57,6 +82,7 @@ impl VideoEncoder {
 			force_keyframe,
 			encode_duration,
 			frames_encoded,
+			bytes_encoded,
 			_thread: thread,
 		}
 	}
@@ -84,27 +110,35 @@ impl VideoEncoder {
 	pub(crate) fn frames_encoded(&self) -> Arc<AtomicU64> {
 		self.frames_encoded.clone()
 	}
+
+	/// Shared atomic counter for the encoded byte total (for periodic logging).
+	pub(crate) fn bytes_encoded(&self) -> Arc<AtomicU64> {
+		self.bytes_encoded.clone()
+	}
 }
 
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
 	mut producer: moq_video::encode::Producer,
+	enc: EncoderConfig,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
 	frames_encoded: Arc<AtomicU64>,
+	bytes_encoded: Arc<AtomicU64>,
 ) {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
-		let enc = match encoder.as_mut() {
-			Some(enc) => enc,
+		let e = match encoder.as_mut() {
+			Some(e) => e,
 			None => {
 				// Game Boy is 160x144; force software (libx264) since hardware
 				// encoders can reject such tiny resolutions.
-				let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, 60);
+				let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, enc.framerate);
+				config.bitrate = enc.bitrate;
 				config.kind = moq_video::encode::Kind::Software;
 				match moq_video::encode::Encoder::new(&config) {
-					Ok(enc) => encoder.insert(enc),
+					Ok(e) => encoder.insert(e),
 					Err(e) => {
 						tracing::error!(error = %e, "H.264 encoder init failed");
 						return;
@@ -115,8 +149,9 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
+		match e.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
 			Ok(packets) => {
+				let byte_count: u64 = packets.iter().map(|p| p.len() as u64).sum();
 				if let Err(e) = producer.publish(packets, msg.ts) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
@@ -124,6 +159,7 @@ fn encoder_thread(
 					return;
 				}
 				frames_encoded.fetch_add(1, Ordering::Relaxed);
+				bytes_encoded.fetch_add(byte_count, Ordering::Relaxed);
 			}
 			// A single bad frame is tolerable; keep going.
 			Err(e) => tracing::error!(error = %e, "H.264 encode error"),
