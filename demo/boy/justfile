@@ -53,9 +53,18 @@ gb-run:
 start rom url='http://localhost:4443/anon':
     cargo run --bin moq-boy -- --url "{{ url }}" --rom "{{ rom }}" --location localhost
 
-# Host the web server
+# Host the web development server (DO NOT expose to the internet - serves source code!)
+dev url='http://localhost:4443/anon':
+    VITE_RELAY_URL="{{ url }}" bun --bun vite --host
+
+# Build for production
+build:
+    bun --bun vite build
+
+# Serve the production build (safe for public access - no source code exposed)
 web url='http://localhost:4443/anon':
-    VITE_RELAY_URL="{{ url }}" bun --bun vite --open --host
+    VITE_RELAY_URL="{{ url }}" bun --bun vite build
+    bun --bun vite preview --host
 
 # --- rom.moq.dev (R2 hosting) ---
 

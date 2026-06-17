@@ -73,4 +73,19 @@ export default defineConfig({
 	optimizeDeps: {
 		exclude: ["@libav.js/variant-opus-af"],
 	},
+	preview: {
+		host: true,
+		port: 5173,
+		headers: {
+			"Cross-Origin-Opener-Policy": "same-origin",
+			"Cross-Origin-Embedder-Policy": "require-corp",
+		},
+		proxy: {
+			"/cert-proxy": {
+				target: "http://localhost:4443",
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
+			},
+		},
+	},
 });
