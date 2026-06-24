@@ -47,6 +47,11 @@ export class WebrtcPeer {
         return this.#connected;
     }
 
+    /** Expose the underlying RTCPeerConnection for stats polling. */
+    getPeerConnection(): RTCPeerConnection | undefined {
+        return this.#pc;
+    }
+
     /**
      * Initialize the peer connection and begin the SDP offer/answer exchange.
      *

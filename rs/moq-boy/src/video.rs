@@ -140,6 +140,12 @@ impl VideoEncoder {
 		Duration::from_micros(self.encode_duration.load(Ordering::Relaxed))
 	}
 
+	/// Shared atomic for the latest encode duration in microseconds,
+	/// for polling from other tasks (e.g. WebRTC status messages).
+	pub fn encode_duration_us(&self) -> Arc<AtomicU64> {
+		self.encode_duration.clone()
+	}
+
 	/// Shared atomic counter for the encoded frame total (for periodic logging).
 	pub(crate) fn frames_encoded(&self) -> Arc<AtomicU64> {
 		self.frames_encoded.clone()

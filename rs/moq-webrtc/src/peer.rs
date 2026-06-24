@@ -13,9 +13,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use serde::Serialize;
 use str0m::change::SdpOffer;
 use str0m::media::{Frequency, MediaTime, Mid};
 use str0m::net::{DatagramRecv, Protocol};
+use str0m::channel::ChannelId;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 /// A parsed viewer command received from the DataChannel.
@@ -70,6 +72,8 @@ pub struct WebrtcPeer {
     audio_mid: Option<Mid>,
     /// Pending DataChannel messages from the viewer.
     incoming_commands: VecDeque<InputCommand>,
+    /// DataChannel ID for sending status back to the browser.
+    channel_id: Option<ChannelId>,
     /// Whether the ICE connection is established (media can flow).
     ice_connected: bool,
     /// Buffered SPS/PPS NAL units to send before the next keyframe.
@@ -132,6 +136,7 @@ impl WebrtcPeer {
             video_mid: None,
             audio_mid: None,
             incoming_commands: VecDeque::new(),
+            channel_id: None,
             ice_connected: false,
             buffered_sps_pps: Vec::new(),
             pending_candidates: Vec::new(),
@@ -228,6 +233,7 @@ impl WebrtcPeer {
                             %label,
                             "DataChannel opened"
                         );
+                        self.channel_id = Some(id);
                     }
                     Event::ChannelData(data) => {
                         if !data.binary {
@@ -275,6 +281,23 @@ impl WebrtcPeer {
     /// Return the next pending viewer input command, if any.
     pub fn recv_input(&mut self) -> Option<InputCommand> {
         self.incoming_commands.pop_front()
+    }
+
+    /// Send a status message to the browser via the DataChannel.
+    ///
+    /// The message is serialized as JSON and sent as a text frame on the
+    /// DataChannel created by the browser (label "control"). Does nothing
+    /// if the DataChannel isn't open yet.
+    pub fn send_status(&mut self, status: &impl Serialize) {
+        let Some(channel_id) = self.channel_id else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string(status) else {
+            return;
+        };
+        if let Some(mut ch) = self.rtc.channel(channel_id) {
+            let _ = ch.write(false, json.as_bytes());
+        }
     }
 
     /// Add a remote ICE candidate received from the browser via signaling.

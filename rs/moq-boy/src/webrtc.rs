@@ -52,10 +52,18 @@ struct WebrtcSession {
     ice_addr: SocketAddr,
     /// Received viewer commands (DataChannel → emulator thread).
     cmd_tx: tokio::sync::mpsc::Sender<Command>,
+    /// Latest video encode duration (microseconds), for status reporting.
+    encode_duration_us: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Whether video is active (at least one connected peer).
     video_active: std::sync::atomic::AtomicBool,
     /// Whether audio is active.
     audio_active: std::sync::atomic::AtomicBool,
+}
+
+impl WebrtcSession {
+    fn encode_duration_ms(&self) -> u64 {
+        self.encode_duration_us.load(std::sync::atomic::Ordering::Relaxed) / 1000
+    }
 }
 
 /// Run moq-boy in WebRTC direct mode.
@@ -128,12 +136,14 @@ pub async fn run_webrtc_mode(
     let udp = Arc::new(udp);
 
     // Shared session state for peer management.
+    let encode_duration_us = session.video_encoder.encode_duration_us();
     let webrtc_session = Arc::new(WebrtcSession {
         peers: StdMutex::new(HashMap::new()),
         peer_addrs: StdMutex::new(HashMap::new()),
         udp: udp.clone(),
         ice_addr,
         cmd_tx: cmd_tx.clone(),
+        encode_duration_us,
         video_active: std::sync::atomic::AtomicBool::new(false),
         audio_active: std::sync::atomic::AtomicBool::new(false),
     });
@@ -214,9 +224,11 @@ pub async fn run_webrtc_mode(
     let ws_poll = webrtc_session.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(10));
+        let mut status_tick: u64 = 0;
         loop {
             interval.tick().await;
             let now = Instant::now();
+            status_tick = status_tick.wrapping_add(1);
 
             // Collect UDP transmits while holding the lock, then send
             // after releasing it (MutexGuard is !Send, can't hold across await).
@@ -253,6 +265,16 @@ pub async fn run_webrtc_mode(
                     while let Some(cmd) = peer.recv_input() {
                         let command = into_command(cmd);
                         let _ = ws_poll.cmd_tx.try_send(command);
+                    }
+
+                    // Send status every 1 second (100 ticks at 10ms).
+                    if status_tick % 100 == 0 {
+                        let encode_ms = ws_poll.encode_duration_ms();
+                        let status = serde_json::json!({
+                            "encode_ms": encode_ms,
+                            "video_fps": 59.7_f64,
+                        });
+                        peer.send_status(&status);
                     }
                 }
 

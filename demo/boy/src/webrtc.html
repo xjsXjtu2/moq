@@ -37,6 +37,7 @@
             }
 
             .video-container {
+                position: relative;
                 margin-top: 1rem;
                 border: 1px solid #333;
                 border-radius: 4px;
@@ -50,6 +51,21 @@
                 aspect-ratio: 10 / 9;
                 object-fit: contain;
                 background: #111;
+            }
+            /* Browser-local timestamp overlay (bottom-left of video).
+               Shows milliseconds since page load, updated every rAF. */
+            .video-ts-overlay {
+                position: absolute;
+                z-index: 1;
+                bottom: 0.5rem;
+                left: 0.5rem;
+                background: rgba(0, 0, 0, 0.7);
+                color: #ffffff;
+                padding: 0.125rem 0.5rem;
+                border-radius: 0.25rem;
+                font-family: monospace;
+                font-size: 1.5rem;
+                pointer-events: none;
             }
 
             .controls {
@@ -113,6 +129,34 @@
                 font-family: monospace;
             }
 
+            .stats-panel {
+                margin-top: 0.5rem;
+                padding: 0.5rem 0.75rem;
+                border: 1px solid #333;
+                border-radius: 4px;
+                max-width: 400px;
+                width: 100%;
+                font-family: monospace;
+                font-size: 0.65rem;
+                color: #888;
+                line-height: 1.6;
+            }
+            .stats-panel .row {
+                display: flex;
+                justify-content: space-between;
+            }
+            .stats-panel .label { color: #666; }
+            .stats-panel .value { color: #aaa; }
+            .stats-panel .value.good { color: #8bac0f; }
+            .stats-panel .value.warn { color: #e67e22; }
+            .stats-panel .value.bad  { color: #e74c3c; }
+            .stats-panel .section-title {
+                color: #8bac0f;
+                margin-top: 0.25rem;
+                margin-bottom: 0.1rem;
+                font-weight: 600;
+            }
+
             .error {
                 color: #e74c3c;
                 font-size: 0.8rem;
@@ -140,9 +184,23 @@
 
         <div class="video-container">
             <video id="video" autoplay playsinline muted></video>
+            <div class="video-ts-overlay" id="ts-overlay">0</div>
         </div>
 
         <div class="status" id="status">Connecting...</div>
+        <div class="stats-panel" id="stats" style="display:none">
+            <div class="section-title">Video</div>
+            <div class="row"><span class="label">Resolution</span><span class="value" id="s-resolution">--</span></div>
+            <div class="row"><span class="label">Codec</span><span class="value" id="s-codec">--</span></div>
+            <div class="row"><span class="label">FPS</span><span class="value" id="s-fps">--</span></div>
+            <div class="row"><span class="label">Packets Lost</span><span class="value" id="s-plost">--</span></div>
+            <div class="row"><span class="label">NACK / PLI</span><span class="value" id="s-nack">--</span></div>
+            <div class="section-title">Latency</div>
+            <div class="row"><span class="label">Jitter Buffer</span><span class="value" id="s-jitter">--</span></div>
+            <div class="row"><span class="label">Decode Time</span><span class="value" id="s-decode">--</span></div>
+            <div class="row"><span class="label">Encode (server)</span><span class="value" id="s-encode">--</span></div>
+            <div class="row"><span class="label">RTT</span><span class="value" id="s-rtt">--</span></div>
+        </div>
         <div class="error" id="error" hidden></div>
 
         <div class="controls" id="controls" style="display:none">
