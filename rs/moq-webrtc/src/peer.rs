@@ -21,7 +21,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 /// A parsed viewer command received from the DataChannel.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct InputCommand {
-    /// `"buttons"` or `"reset"`.
+    /// `"buttons"` or `"reset"`. JSON key is `"type"` (reserved word in Rust).
+    #[serde(rename = "type")]
     pub cmd_type: String,
     /// Button names when cmd_type is `"buttons"`.
     pub buttons: Vec<String>,
