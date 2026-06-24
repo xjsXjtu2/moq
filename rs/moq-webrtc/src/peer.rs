@@ -3,6 +3,9 @@
 //! Wraps a str0m [`Rtc`] instance, sets up H.264 video and Opus audio tracks
 //! on the SDP answer, provides push/poll APIs for the emulator loop, and
 //! routes incoming DataChannel messages back to the application.
+//!
+//! str0m handles RTP packetization internally (we are NOT in RTP mode),
+//! so media frames are written via `writer().write()`.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -84,13 +87,21 @@ impl WebrtcPeer {
         offer_sdp: &str,
         local_addr: SocketAddr,
     ) -> Result<Self> {
+        // NOT in RTP mode: let str0m handle RTP packetization internally.
+        // Explicitly disable VP8/VP9 so H.264 is the only video codec the
+        // server supports. Without this the browser's SDP offer (which lists
+        // VP8 first) would cause str0m to negotiate VP8, but we encode H.264.
         let mut rtc = Rtc::builder()
-            .set_rtp_mode(true)
+            .set_ice_lite(true)
+            .enable_vp8(false)
+            .enable_vp9(false)
             .enable_h264(true)
             .enable_opus(true)
             .build();
 
-        // Add local host candidate so the browser knows where to send UDP.
+        // ICE-Lite: the server has a known public address. Add a single host
+        // candidate that will be included in the SDP answer. The browser does
+        // full ICE; the server is "lite" and never sends trickle candidates.
         let candidate =
             Candidate::host(local_addr, Protocol::Udp).context("failed to create host candidate")?;
         rtc.add_local_candidate(candidate);

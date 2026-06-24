@@ -22,6 +22,10 @@ use crate::{AudioError, Frame};
 /// The catalog rendition is registered at construction (not on first
 /// write), so a subscriber that opens the catalog before any frames
 /// arrive still sees the track.
+/// Called with each encoded Opus packet (payload bytes, timestamp in microseconds)
+/// before it is published to the MoQ track. Set via [`AudioProducer::set_webrtc_tap`].
+pub type WebrtcTap = Box<dyn Fn(Bytes, u64) + Send>;
+
 pub struct AudioProducer {
 	encoder: Encoder,
 	resampler: Option<Resampler>,
@@ -38,6 +42,8 @@ pub struct AudioProducer {
 	/// Total encoded packets published (shared with the counter handed out via
 	/// [`packets_encoded`](Self::packets_encoded)).
 	packets_encoded: Arc<AtomicU64>,
+	/// Optional tap that receives each encoded Opus packet for WebRTC streaming.
+	webrtc_tap: Option<WebrtcTap>,
 }
 
 impl AudioProducer {
@@ -87,6 +93,7 @@ impl AudioProducer {
 			frames_produced: 0,
 			epoch_us: None,
 			packets_encoded: Arc::new(AtomicU64::new(0)),
+			webrtc_tap: None,
 		})
 	}
 
@@ -111,6 +118,13 @@ impl AudioProducer {
 	/// audio stays aligned with a wall-clock video track, rather than the gap
 	/// being compressed out by the running sample count. Mirrors moq-boy's
 	/// `reset_epoch`.
+	/// Set a tap that receives each encoded Opus packet for WebRTC streaming.
+	/// The callback is invoked with (payload_bytes, timestamp_micros) before
+	/// the packet is published to the MoQ track.
+	pub fn set_webrtc_tap(&mut self, tap: WebrtcTap) {
+		self.webrtc_tap = Some(tap);
+	}
+
 	pub fn reset_epoch(&mut self) {
 		self.epoch_us = None;
 		self.frames_produced = 0;
@@ -161,6 +175,11 @@ impl AudioProducer {
 	}
 
 	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), AudioError> {
+		// Tap encoded Opus packet to WebRTC broadcast if configured.
+		if let Some(ref tap) = self.webrtc_tap {
+			tap(payload.clone(), timestamp.as_micros() as u64);
+		}
+
 		// Each audio packet is its own moq-lite group, matching
 		// moq_mux::codec::opus::Import. Opus PLC handles dropped groups.
 		let mux_frame = MuxFrame {

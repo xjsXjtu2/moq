@@ -337,6 +337,16 @@ async fn run(config: &Config) -> Result<()> {
 		webrtc_tap,
 	};
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone(), enc_config);
+
+	// Create audio encoder, optionally with WebRTC tap.
+	#[cfg(feature = "webrtc")]
+	let (audio_encoder, audio_rx) = if webrtc_tap {
+		let (enc, rx) = audio::AudioEncoder::new_with_webrtc(broadcast.clone(), catalog.clone(), 44100)?;
+		(enc, Some(rx))
+	} else {
+		(audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?, None)
+	};
+	#[cfg(not(feature = "webrtc"))]
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.track.clone();
@@ -411,6 +421,7 @@ async fn run(config: &Config) -> Result<()> {
 			audio_encoder,
 			status_publisher,
 			addr,
+			audio_rx,
 		)
 		.await;
 	}

@@ -11,29 +11,14 @@ export interface WebrtcPeerConfig {
 }
 
 /**
- * Manages a WebRTC peer connection to the moq-boy server.
+ * Manages a WebRTC peer connection to the moq-boy server (ICE-Lite).
  *
- * Establishes a client-offer WebRTC connection:
- * 1. Creates an RTCPeerConnection with H.264 video and Opus audio codec preferences.
- * 2. Creates a DataChannel for sending button commands and receiving status.
- * 3. Generates an SDP offer and sends it to the signaling server.
- * 4. Receives the SDP answer and ICE candidates via SSE.
- * 5. Once connected, delivers remote media tracks via callbacks and accepts
- *    outgoing commands via the DataChannel.
+ * In ICE-Lite mode the server has a known public address, so signaling
+ * is a single round-trip: the SDP answer (with the host candidate) is
+ * returned directly in the POST /webrtc/offer response. No SSE needed.
  *
- * Usage:
- * ```typescript
- * const peer = new WebrtcPeer({
- *     signaling: { baseUrl: "http://localhost:8080/webrtc" },
- * });
- *
- * peer.onTrack = (stream) => {
- *     videoElement.srcObject = stream;
- * };
- *
- * await peer.connect();
- * peer.sendCommand({ type: "buttons", buttons: ["a"] });
- * ```
+ * The browser still uses trickle ICE for its own candidates. They are
+ * sent to the server via POST /webrtc/ice/:id as they are discovered.
  */
 export class WebrtcPeer {
     readonly #signaling: SignalingClient;
@@ -65,8 +50,11 @@ export class WebrtcPeer {
     /**
      * Initialize the peer connection and begin the SDP offer/answer exchange.
      *
-     * Returns a promise that resolves once the connection is established (ICE connected).
-     * If the connection fails, the promise rejects with an error.
+     * 1. Creates RTCPeerConnection with recvonly video + audio transceivers
+     * 2. Creates a DataChannel for button commands
+     * 3. Generates SDP offer and sends it via POST /webrtc/offer
+     * 4. Receives SDP answer directly in the response (ICE-Lite)
+     * 5. Sends local ICE candidates via POST /webrtc/ice/:id
      */
     async connect(): Promise<void> {
         const config: RTCConfiguration = {};
@@ -91,10 +79,7 @@ export class WebrtcPeer {
         };
 
         // Create the DataChannel for sending button commands.
-        this.#dc = this.#pc.createDataChannel("control", {
-            ordered: true,
-            // Negotiate delivery semantics: reliable+ordered for control messages.
-        });
+        this.#dc = this.#pc.createDataChannel("control", { ordered: true });
 
         this.#dc.onopen = () => {
             console.log("WebRTC DataChannel: open");
@@ -113,53 +98,58 @@ export class WebrtcPeer {
             }
         };
 
-        // Handle incoming media tracks.
+        // Handle incoming media tracks. str0m may deliver video and audio on
+        // separate streams via `event.streams[0]`. To guarantee both play
+        // through the same <video> element, we build our own MediaStream
+        // that collects every track regardless of which stream it arrives on.
+        const remoteStream = new MediaStream();
+
         this.#pc.ontrack = (event: RTCTrackEvent) => {
             console.log("WebRTC ontrack:", event.track.kind, event.track.id);
-            // Build a MediaStream from the received tracks.
-            const stream = event.streams[0] ?? new MediaStream();
-            if (!event.streams[0]) {
-                stream.addTrack(event.track);
-            }
-            this.onTrack?.(stream);
+            remoteStream.addTrack(event.track);
+            this.onTrack?.(remoteStream);
         };
 
         // Configure transceivers for receiving video and audio.
-        // This tells the browser to include H.264 and Opus in the SDP offer.
-        this.#pc.addTransceiver("video", {
-            direction: "recvonly",
-        });
-        this.#pc.addTransceiver("audio", {
-            direction: "recvonly",
-        });
+        this.#pc.addTransceiver("video", { direction: "recvonly" });
+        this.#pc.addTransceiver("audio", { direction: "recvonly" });
+
+        // Prefer H.264 over VP8/VP9 for the video transceiver.
+        // The server encodes H.264; if the browser negotiates VP8 instead,
+        // the VP8 decoder will reject H.264 NAL units and produce no frames.
+        {
+            const videoTcvr = this.#pc.getTransceivers().find((t) => t.receiver.track.kind === "video");
+            if (videoTcvr) {
+                const caps = RTCRtpReceiver.getCapabilities("video");
+                if (caps) {
+                    const h264Codecs = caps.codecs.filter(
+                        (c) => c.mimeType.toLowerCase().includes("h264"),
+                    );
+                    if (h264Codecs.length > 0) {
+                        videoTcvr.setCodecPreferences(h264Codecs);
+                        console.log("WebRTC: H.264 codec preference set, count=", h264Codecs.length);
+                    } else {
+                        console.warn("WebRTC: no H.264 codec available in browser; video may not decode");
+                    }
+                }
+            }
+        }
 
         // Create and send the SDP offer.
         const offer = await this.#pc.createOffer();
         await this.#pc.setLocalDescription(offer);
 
-        const sessionId = await this.#signaling.sendOffer(offer.sdp!);
+        // POST offer, receive answer synchronously (ICE-Lite).
+        const { sessionId, answerSdp } = await this.#signaling.sendOffer(offer.sdp!);
         console.log("WebRTC: offer sent, session_id=", sessionId);
 
-        // Subscribe to server answer and ICE candidates via SSE.
-        // Must happen AFTER sendOffer because the SSE endpoint URL uses the session ID.
-        const answerPromise = new Promise<RTCSessionDescriptionInit>(
-            (resolve) => {
-                this.#signaling.subscribe(
-                    (sdp) => resolve({ type: "answer", sdp }),
-                    (candidate) => {
-                        this.#pc?.addIceCandidate(new RTCIceCandidate(JSON.parse(candidate)))
-                            .catch((e) => console.warn("ICE candidate add failed:", e));
-                    },
-                );
-            },
+        // Set the remote description from the answer.
+        await this.#pc.setRemoteDescription(
+            new RTCSessionDescription({ type: "answer", sdp: answerSdp }),
         );
+        console.log("WebRTC: remote description set (answer from POST response)");
 
-        // Wait for the server answer.
-        const answer = await answerPromise;
-        await this.#pc.setRemoteDescription(new RTCSessionDescription(answer));
-        console.log("WebRTC: remote description set");
-
-        // Send local ICE candidates as they are discovered.
+        // Send local (browser) ICE candidates to the server as they are discovered.
         this.#pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
             if (event.candidate) {
                 this.#signaling.sendIceCandidate(JSON.stringify(event.candidate.toJSON()));
@@ -207,14 +197,13 @@ export class WebrtcPeer {
                     clearTimeout(timeout);
                     reject(new Error("WebRTC connection failed"));
                 }
-                // "connecting" and "new" states: keep waiting.
             };
 
             pc.onconnectionstatechange = () => {
                 check();
                 this.onStateChange?.(pc.connectionState);
             };
-            check(); // In case it's already connected.
+            check();
         });
     }
 }

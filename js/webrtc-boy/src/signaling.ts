@@ -4,25 +4,28 @@ export interface SignalingClientConfig {
     baseUrl: string;
 }
 
-/** Response from POST /webrtc/offer. */
+/** Response from POST /webrtc/offer (ICE-Lite mode). */
 interface OfferResponse {
     session_id: string;
-    status: string;
+    sdp: string; // SDP answer, returned directly in the response
+    error?: string;
 }
 
 /**
- * HTTP signaling client for WebRTC SDP/ICE exchange.
+ * HTTP signaling client for WebRTC SDP/ICE exchange (ICE-Lite).
  *
- * Communicates with the moq-boy WebRTC signaling server via REST endpoints:
- * - POST /webrtc/offer     — send client SDP offer, receive session ID
- * - POST /webrtc/ice/:id   — send local ICE candidate
- * - GET  /webrtc/ice/:id   — receive server ICE candidates via SSE
+ * In ICE-Lite mode, the server has a known public address. Signaling is a
+ * single round-trip: the browser POSTs its SDP offer, and the server returns
+ * the SDP answer (with the host candidate baked in) directly in the response.
+ *
+ * Endpoints:
+ * - POST /webrtc/offer     — send offer, receive answer synchronously
+ * - POST /webrtc/ice/:id   — send local ICE candidate (browser trickle)
  * - POST /webrtc/close/:id — close the session
  */
 export class SignalingClient {
     readonly #baseUrl: string;
     #sessionId?: string;
-    #eventSource?: EventSource;
 
     constructor(config: SignalingClientConfig) {
         this.#baseUrl = config.baseUrl.replace(/\/$/, "");
@@ -34,13 +37,10 @@ export class SignalingClient {
     }
 
     /**
-     * Send the local SDP offer to the server.
-     *
-     * Returns when the server acknowledges the offer. The actual SDP answer
-     * is delivered asynchronously via the SSE channel — call `subscribeAnswer`
-     * before calling this to receive the answer.
+     * Send the local SDP offer to the server and receive the SDP answer
+     * directly in the response (ICE-Lite: no SSE needed).
      */
-    async sendOffer(sdp: string): Promise<string> {
+    async sendOffer(sdp: string): Promise<{ sessionId: string; answerSdp: string }> {
         const response = await fetch(`${this.#baseUrl}/offer`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -52,56 +52,17 @@ export class SignalingClient {
         }
 
         const data = (await response.json()) as OfferResponse;
-        this.#sessionId = data.session_id;
-        console.log("WebRTC signaling: offer accepted, session_id=", data.session_id);
-        return data.session_id;
-    }
-
-    /**
-     * Subscribe to server-pushed SDP answer and ICE candidates via SSE.
-     *
-     * Call this BEFORE `sendOffer()` to ensure no events are missed.
-     *
-     * @param onAnswer  Called when the server sends the SDP answer.
-     * @param onIce     Called for each server ICE candidate.
-     */
-    subscribe(onAnswer: (sdp: string) => void, onIce: (candidate: string) => void): void {
-        if (!this.#sessionId) {
-            throw new Error("Cannot subscribe before session is created; call sendOffer() first");
+        if (data.error) {
+            throw new Error(`Signaling offer rejected: ${data.error}`);
         }
 
-        const url = `${this.#baseUrl}/ice/${this.#sessionId}`;
-        console.log("WebRTC signaling: opening SSE", url);
-        this.#eventSource = new EventSource(url);
-
-        this.#eventSource.onopen = () => {
-            console.log("WebRTC signaling: SSE connection opened");
-        };
-
-        this.#eventSource.addEventListener("candidate", (event: MessageEvent) => {
-            console.log("WebRTC signaling: SSE candidate event, data length=", event.data.length);
-            const data = JSON.parse(event.data);
-            if (data.candidate) {
-                // Check for prefixed answer delivery (the server sends the
-                // SDP answer as a candidate with an "ANSWER:" prefix).
-                if (data.candidate.startsWith("ANSWER:")) {
-                    const sdp = data.candidate.slice("ANSWER:".length);
-                    console.log("WebRTC signaling: received answer via SSE, sdp length=", sdp.length);
-                    onAnswer(sdp);
-                } else {
-                    console.log("WebRTC signaling: received ICE candidate via SSE");
-                    onIce(data.candidate);
-                }
-            }
-        });
-
-        this.#eventSource.onerror = () => {
-            console.warn("WebRTC signaling: SSE connection error, readyState=", this.#eventSource?.readyState);
-        };
+        this.#sessionId = data.session_id;
+        console.log("WebRTC signaling: offer accepted, session_id=", data.session_id);
+        return { sessionId: data.session_id, answerSdp: data.sdp };
     }
 
     /**
-     * Send a local ICE candidate to the server.
+     * Send a local (browser) ICE candidate to the server.
      */
     async sendIceCandidate(candidate: string): Promise<void> {
         if (!this.#sessionId) throw new Error("No session ID");
@@ -121,9 +82,6 @@ export class SignalingClient {
      * Close the signaling session.
      */
     async close(): Promise<void> {
-        this.#eventSource?.close();
-        this.#eventSource = undefined;
-
         if (this.#sessionId) {
             try {
                 await fetch(`${this.#baseUrl}/close/${this.#sessionId}`, { method: "POST" });
