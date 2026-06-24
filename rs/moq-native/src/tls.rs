@@ -267,6 +267,68 @@ impl Server {
 		}
 		Ok(roots)
 	}
+
+	/// Build a [`rustls::ServerConfig`] from the configured certificates and keys.
+	///
+	/// Uses the first cert/key pair when file-based certs are provided, or
+	/// generates a self-signed certificate when `generate` hostnames are given.
+	/// The returned config supports TLS 1.3 and TLS 1.2 with no client auth.
+	pub fn build_server_config(&self) -> Result<rustls::ServerConfig> {
+		let provider = crate::crypto::provider();
+
+		let (certs, key) = if !self.cert.is_empty() {
+			if self.cert.len() != self.key.len() {
+				return Err(Error::CertKeyCountMismatch);
+			}
+			let certs = read_certs(&self.cert[0])?;
+			if certs.is_empty() {
+				return Err(Error::Empty);
+			}
+			let key = PrivateKeyDer::from_pem_file(&self.key[0]).map_err(Error::Key)?;
+			(certs, key)
+		} else if !self.generate.is_empty() {
+			self.generate_cert_and_key()?
+		} else {
+			return Err(Error::NoCertSource);
+		};
+
+		let config = rustls::ServerConfig::builder_with_provider(provider)
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+			.map_err(Error::Rustls)?
+			.with_no_client_auth()
+			.with_single_cert(certs, key)
+			.map_err(Error::Rustls)?;
+
+		Ok(config)
+	}
+
+	/// Generate a self-signed certificate and private key.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	fn generate_cert_and_key(
+		&self,
+	) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+		let key_pair = rcgen::KeyPair::generate().map_err(Error::Rcgen)?;
+
+		let mut params =
+			rcgen::CertificateParams::new(self.generate.clone()).map_err(Error::Rcgen)?;
+
+		params.not_before =
+			::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
+		params.not_after = params.not_before + ::time::Duration::days(14);
+
+		let cert = params.self_signed(&key_pair).map_err(Error::Rcgen)?;
+
+		let key_der: PrivateKeyDer<'static> = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec()).into();
+
+		Ok((vec![cert.into()], key_der))
+	}
+
+	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+	fn generate_cert_and_key(
+		&self,
+	) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+		Err(Error::NoCryptoProvider)
+	}
 }
 
 /// TLS certificate information including fingerprints.

@@ -15,7 +15,7 @@ rust-version.workspace = true
 default = ["quinn", "websocket"]
 jemalloc = ["moq-native/jemalloc"]
 quinn = ["moq-native/quinn"]
-webrtc = ["moq-webrtc"]
+webrtc = ["moq-webrtc/tls"]
 websocket = ["moq-native/websocket"]
 
 [dependencies]
@@ -33,5 +33,6 @@ moq-webrtc = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true }
 tracing = "0.1"
 url = "2"

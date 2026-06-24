@@ -3914,6 +3914,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]
@@ -4189,11 +4190,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "rustls",
  "serde",
  "serde_json",
  "str0m",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

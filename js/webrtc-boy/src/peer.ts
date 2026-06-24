@@ -133,8 +133,15 @@ export class WebrtcPeer {
             direction: "recvonly",
         });
 
-        // Subscribe to server answer and ICE candidates BEFORE sending offer
-        // to avoid missing the answer.
+        // Create and send the SDP offer.
+        const offer = await this.#pc.createOffer();
+        await this.#pc.setLocalDescription(offer);
+
+        const sessionId = await this.#signaling.sendOffer(offer.sdp!);
+        console.log("WebRTC: offer sent, session_id=", sessionId);
+
+        // Subscribe to server answer and ICE candidates via SSE.
+        // Must happen AFTER sendOffer because the SSE endpoint URL uses the session ID.
         const answerPromise = new Promise<RTCSessionDescriptionInit>(
             (resolve) => {
                 this.#signaling.subscribe(
@@ -146,13 +153,6 @@ export class WebrtcPeer {
                 );
             },
         );
-
-        // Create and send the SDP offer.
-        const offer = await this.#pc.createOffer();
-        await this.#pc.setLocalDescription(offer);
-
-        const sessionId = await this.#signaling.sendOffer(offer.sdp!);
-        console.log("WebRTC: offer sent, session_id=", sessionId);
 
         // Wait for the server answer.
         const answer = await answerPromise;

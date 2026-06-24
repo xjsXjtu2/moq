@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 use crate::audio::AudioEncoder;
@@ -46,6 +47,12 @@ use moq_webrtc::{
 struct WebrtcSession {
     /// Active peers indexed by session ID.
     peers: Mutex<HashMap<String, WebrtcPeer>>,
+    /// Maps remote SocketAddr → session_id for UDP packet routing.
+    peer_addrs: Mutex<HashMap<SocketAddr, String>>,
+    /// Shared UDP socket for ICE/DTLS/RTP transport.
+    udp: Arc<UdpSocket>,
+    /// ICE host candidate address (advertised to browsers).
+    ice_addr: SocketAddr,
     /// Received viewer commands (DataChannel → emulator thread).
     cmd_tx: tokio::sync::mpsc::Sender<Command>,
     /// Whether video is active (at least one connected peer).
@@ -61,7 +68,7 @@ struct WebrtcSession {
 /// - Drives the emulator loop, delivering encoded frames to WebRTC peers
 /// - Receives button commands via DataChannel
 pub async fn run_webrtc_mode(
-    _config: &crate::Config,
+    config: &crate::Config,
     name: &str,
     rom_path: &std::path::Path,
     session: Arc<crate::Session>,
@@ -73,15 +80,93 @@ pub async fn run_webrtc_mode(
 ) -> Result<()> {
     tracing::info!(%addr, %name, "starting WebRTC direct mode");
 
+    // Resolve the IP address to advertise in ICE host candidates.
+    // 0.0.0.0 is invalid for ICE. Default: use a quick UDP connect to
+    // discover the local routable IP. On ECS behind NAT, use
+    // --webrtc-udp-addr to specify the exact IP.
+    let ice_ip = match config.webrtc_udp_addr {
+        Some(ip) => {
+            tracing::info!(%ip, "WebRTC ICE: using configured address");
+            ip
+        }
+        None => {
+            // Trick: connect a UDP socket to a public address to find the local
+            // interface IP without sending any packets.
+            let fallback = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+            let ip = std::net::UdpSocket::bind("0.0.0.0:0")
+                .ok()
+                .and_then(|s| {
+                    s.connect("8.8.8.8:53").ok()?;
+                    s.local_addr().ok().map(|a| a.ip())
+                })
+                .unwrap_or(fallback);
+            if ip.is_loopback() {
+                tracing::warn!(
+                    "WebRTC ICE: auto-detected loopback address; browser must be on the same machine. \
+                     Set --webrtc-udp-addr for remote access."
+                );
+            }
+            tracing::info!(%ip, "WebRTC ICE: auto-detected address");
+            ip
+        }
+    };
+
+    // Ensure the IP is valid for a host candidate.
+    if ice_ip.is_unspecified() || ice_ip.is_loopback() && config.webrtc_udp_addr.is_none() {
+        tracing::warn!(
+            "ICE host candidate IP is {}; browser on a remote machine won't be able to reach this. \
+             Use --webrtc-udp-addr to specify a routable IP.",
+            ice_ip
+        );
+    }
+
+    // Bind a UDP socket for ICE/STUN/DTLS/RTP transport.
+    // If --webrtc-udp-port is set, use that specific port so it can be
+    // whitelisted in ECS security groups; otherwise the OS picks a free port.
+    let udp_bind_addr = match config.webrtc_udp_port {
+        Some(port) => {
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+            tracing::info!(%port, "WebRTC UDP: using configured port");
+            addr
+        }
+        None => {
+            tracing::info!("WebRTC UDP: OS-assigned port (use --webrtc-udp-port to pin)");
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+        }
+    };
+    let udp = UdpSocket::bind(udp_bind_addr)
+        .await
+        .context("failed to bind UDP socket for WebRTC transport")?;
+    let udp_port = udp.local_addr()?.port();
+
+    // The ICE candidate address uses the resolved IP + actual UDP port.
+    let ice_addr = std::net::SocketAddr::new(ice_ip, udp_port);
+    tracing::info!(%ice_addr, "WebRTC UDP transport bound");
+
+    let udp = Arc::new(udp);
+
     // Set up the signaling server.
     let (signaling, mut offer_rx) = SignalingServer::new();
     let signaling = Arc::new(signaling);
     let signaling_clone = signaling.clone();
-    tokio::spawn(async move {
-        if let Err(e) = signaling_clone.serve(addr).await {
-            tracing::error!(error = %e, "signaling server stopped");
-        }
-    });
+
+    let tls_config = &config.server.tls;
+    if !tls_config.cert.is_empty() || !tls_config.generate.is_empty() {
+        let server_config = tls_config.build_server_config()?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        tracing::info!("WebRTC signaling will use TLS");
+        tokio::spawn(async move {
+            if let Err(e) = signaling_clone.serve_tls(addr, acceptor).await {
+                tracing::error!(error = %e, "signaling server stopped");
+            }
+        });
+    } else {
+        tokio::spawn(async move {
+            if let Err(e) = signaling_clone.serve(addr).await {
+                tracing::error!(error = %e, "signaling server stopped");
+            }
+        });
+    }
 
     // Create a broadcast channel for encoded video frames from the encoder thread.
     // The encoder was already created with `webrtc_tap: true` in main.rs.
@@ -93,6 +178,9 @@ pub async fn run_webrtc_mode(
     // Shared session state for peer management.
     let webrtc_session = Arc::new(WebrtcSession {
         peers: Mutex::new(HashMap::new()),
+        peer_addrs: Mutex::new(HashMap::new()),
+        udp: udp.clone(),
+        ice_addr,
         cmd_tx: cmd_tx.clone(),
         video_active: std::sync::atomic::AtomicBool::new(false),
         audio_active: std::sync::atomic::AtomicBool::new(false),
@@ -105,7 +193,7 @@ pub async fn run_webrtc_mode(
     tokio::spawn(async move {
         while let Ok(accepted) = offer_rx.recv().await {
             let session_id = accepted.session_id.clone();
-            match WebrtcPeer::accept_offer(session_id.clone(), &accepted.sdp_offer) {
+            match WebrtcPeer::accept_offer(session_id.clone(), &accepted.sdp_offer, ice_addr) {
                 Ok(peer) => {
                     tracing::info!(%session_id, "WebRTC peer created");
                     // Generate the SDP answer and push it to the client.
@@ -123,17 +211,21 @@ pub async fn run_webrtc_mode(
         }
     });
 
-    // Spawn a task to poll peers and relay ICE candidates.
+    // Spawn a task to poll peers, relay ICE candidates, and send UDP transmits.
     let ws2 = webrtc_session.clone();
     let sig2 = signaling.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
             interval.tick().await;
+            let now = Instant::now();
             let mut peers = ws2.peers.lock().await;
             let mut dead_sessions = Vec::new();
 
             for (sid, peer) in peers.iter_mut() {
+                // Feed timeout to str0m.
+                let _ = peer.handle_timeout(now);
+
                 match peer.poll() {
                     Ok(outputs) => {
                         for out in outputs {
@@ -145,9 +237,12 @@ pub async fn run_webrtc_mode(
                                     dead_sessions.push(sid);
                                 }
                                 WebrtcOutput::Answer { session_id, sdp } => {
-                                    // Push the answer via the ICE channel as a special event.
-                                    // A full implementation would add a dedicated answer SSE event.
                                     sig2.push_ice(&session_id, &format!("ANSWER:{}", sdp)).await;
+                                }
+                                WebrtcOutput::Transmit { destination, contents } => {
+                                    if let Err(e) = ws2.udp.send_to(&contents, destination).await {
+                                        tracing::debug!(%destination, error = %e, "UDP send failed");
+                                    }
                                 }
                             }
                         }
@@ -167,6 +262,8 @@ pub async fn run_webrtc_mode(
 
             for sid in dead_sessions {
                 peers.remove(&sid);
+                // Clean up address mapping.
+                ws2.peer_addrs.lock().await.retain(|_, s| s != &sid);
                 tracing::info!(%sid, "WebRTC peer removed");
             }
 
@@ -174,6 +271,50 @@ pub async fn run_webrtc_mode(
             let count = peers.len();
             ws2.video_active.store(count > 0, std::sync::atomic::Ordering::Relaxed);
             ws2.audio_active.store(count > 0, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    // Spawn a UDP receive loop: feed incoming packets to the correct peer.
+    let ws3 = webrtc_session.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        loop {
+            match ws3.udp.recv_from(&mut buf).await {
+                Ok((n, source)) => {
+                    let now = Instant::now();
+                    let dest = ws3.ice_addr;
+                    let mut peers = ws3.peers.lock().await;
+                    // Find the peer by session_id from the address map.
+                    // On first packet from a new source, try to find the peer
+                    // whose ICE candidate matches. For now, route by source addr
+                    // if we've seen it before; otherwise broadcast to all connected peers.
+                    let session_id = ws3.peer_addrs.lock().await.get(&source).cloned();
+                    if let Some(ref sid) = session_id {
+                        if let Some(peer) = peers.get_mut(sid) {
+                            if let Err(e) = peer.handle_input(now, source, dest, &buf[..n]) {
+                                tracing::debug!(%source, error = %e, "handle_input failed");
+                            }
+                        }
+                    } else {
+                        // First packet from this source: try each connected peer.
+                        // ICE STUN packets will be accepted by the correct one.
+                        for (_sid, peer) in peers.iter_mut() {
+                            if peer.is_connected() || !peer.is_connected() {
+                                // Try to feed — str0m will accept or ignore.
+                                if peer.handle_input(now, source, dest, &buf[..n]).is_ok() {
+                                    // Record the mapping for future packets.
+                                    let sid = peer.session_id().to_string();
+                                    ws3.peer_addrs.lock().await.insert(source, sid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "UDP recv error");
+                }
+            }
         }
     });
 
@@ -418,20 +559,17 @@ fn run_emulator_webrtc(
 
 /// Dispatch encoded video frames to all connected WebRTC peers.
 ///
-/// Reads encoded frames from the broadcast channel and pushes them to every
-/// active peer as RTP packets.
+/// Reads encoded frames from the broadcast channel and pushes each NAL unit
+/// to every connected peer via str0m's media writer.
 async fn dispatch_frames_to_peers(
     session: Arc<WebrtcSession>,
     video_rx: &mut tokio::sync::broadcast::Receiver<EncodedFrame>,
 ) -> Result<()> {
-    let mut packetizer = moq_webrtc::RtpPacketizer::default();
-
     loop {
         let frame = match video_rx.recv().await {
             Ok(f) => f,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(skipped = n, "WebRTC video frame dispatch lagging");
-                // Reset the receiver so we don't get stale frames.
                 continue;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -442,42 +580,22 @@ async fn dispatch_frames_to_peers(
 
         // RTP timestamp: 90 kHz clock, microseconds → 90kHz units
         let pts_90khz = (frame.ts_us * 90 / 1000) as u32;
+        let now = Instant::now();
 
-        let peers = session.peers.lock().await;
+        let mut peers = session.peers.lock().await;
         if peers.is_empty() {
             continue;
         }
 
-        // For each NAL unit in the encoded frame, create an RTP packet.
-        // The final NAL gets the marker bit set.
-        let nal_count = frame.nals.len();
-        for (i, nal) in frame.nals.iter().enumerate() {
-            let is_last = i == nal_count - 1;
-            let rtp = if is_last {
-                packetizer.wrap_h264_marker(nal, pts_90khz)
-            } else {
-                packetizer.wrap_h264(nal, pts_90khz)
-            };
-
-            // Push to each connected peer.
-            // In a full implementation with str0m, we'd call
-            // peer.rtc.write_rtp(video_mid, pts, &rtp) here.
-            // For now, the RTP packets are constructed and
-            // tracked for debugging.
-            let _ = rtp;
-
-            // TODO: integrate with str0m media writer API:
-            // for (sid, peer) in peers.iter_mut() {
-            //     if let Some(mid) = peer.video_mid {
-            //         peer.rtc.write_rtp(mid, ...).ok();
-            //     }
-            // }
-        }
-
-        // Reset packetizer sequence numbers on keyframe to help
-        // new peers start decoding immediately.
-        if frame.is_keyframe {
-            packetizer.reset_seq();
+        for (_sid, peer) in peers.iter_mut() {
+            if !peer.is_connected() {
+                continue;
+            }
+            for nal in &frame.nals {
+                if let Err(e) = peer.push_video(nal, pts_90khz, now) {
+                    tracing::debug!(error = %e, "push_video failed");
+                }
+            }
         }
     }
 }

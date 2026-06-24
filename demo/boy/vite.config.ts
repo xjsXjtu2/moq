@@ -28,7 +28,7 @@ export default {};
 						return;
 					}
 					next();
-				},
+			},
 			);
 		},
 		transformIndexHtml(html: string) {
@@ -69,12 +69,20 @@ export default defineConfig({
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
 			},
+			// Proxy for TLS-enabled signaling server (--tls-generate / --tls-cert).
+			// Must come before /webrtc-proxy to match the more specific path first.
+			"/webrtc-proxy-tls": {
+				target: "https://localhost:8080",
+				changeOrigin: true,
+				secure: false,
+				rewrite: (path) => path.replace(/^\/webrtc-proxy-tls/, "/webrtc"),
+			},
 			// Proxy WebRTC signaling requests to moq-boy's WebRTC HTTP server.
 			// The default WebRTC mode listens on port 8080.
 			"/webrtc-proxy": {
 				target: "http://localhost:8080",
 				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/webrtc-proxy/, ""),
+				rewrite: (path) => path.replace(/^\/webrtc-proxy/, "/webrtc"),
 			},
 		},
 	},
@@ -94,11 +102,19 @@ export default defineConfig({
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
 			},
+			// Proxy for TLS-enabled signaling server (--tls-generate / --tls-cert).
+			// Must come before /webrtc-proxy to match the more specific path first.
+			"/webrtc-proxy-tls": {
+				target: "https://localhost:8080",
+				changeOrigin: true,
+				secure: false,
+				rewrite: (path) => path.replace(/^\/webrtc-proxy-tls/, "/webrtc"),
+			},
 			// Proxy WebRTC signaling requests to moq-boy's WebRTC HTTP server.
 			"/webrtc-proxy": {
 				target: "http://localhost:8080",
 				changeOrigin: true,
-				rewrite: (path) => path.replace(/^\/webrtc-proxy/, ""),
+				rewrite: (path) => path.replace(/^\/webrtc-proxy/, "/webrtc"),
 			},
 		},
 	},

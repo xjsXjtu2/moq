@@ -120,6 +120,25 @@ pub struct Config {
 	#[arg(long)]
 	pub webrtc_listen: Option<SocketAddr>,
 
+	/// IP address to advertise in WebRTC ICE host candidates.
+	///
+	/// Must be a real routable IP (not 0.0.0.0). When omitted, the first
+	/// non-loopback IPv4 address from the local interfaces is used.
+	/// Use this on ECS / behind NAT when the auto-detected private IP isn't
+	/// reachable from the browser.
+	#[cfg(feature = "webrtc")]
+	#[arg(long)]
+	pub webrtc_udp_addr: Option<std::net::IpAddr>,
+
+	/// UDP port for WebRTC ICE/STUN/DTLS/RTP transport.
+	///
+	/// When set, the UDP socket binds to this specific port so it can be
+	/// whitelisted in firewall / security group rules. When omitted, the
+	/// OS picks a free port (shown in the startup log).
+	#[cfg(feature = "webrtc")]
+	#[arg(long)]
+	pub webrtc_udp_port: Option<u16>,
+
 	/// STUN server URL for WebRTC ICE candidate gathering (optional).
 	/// Example: stun:stun.l.google.com:19302
 	#[cfg(feature = "webrtc")]
@@ -883,14 +902,19 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
-	// Validate: need at least one of --url or --listen (server-bind).
+	// Validate: need at least one of --url, --listen (server-bind), or --webrtc-listen.
+	#[cfg(feature = "webrtc")]
+	let has_webrtc = config.webrtc_listen.is_some();
+	#[cfg(not(feature = "webrtc"))]
+	let has_webrtc = false;
 	if config.url.is_none()
 		&& config.server.bind.is_none()
 		&& config.server.tls.generate.is_empty()
 		&& config.server.tls.cert.is_empty()
+		&& !has_webrtc
 	{
 		anyhow::bail!(
-			"must specify either --url <relay-url> (relay mode) or --listen <addr> with TLS config (server/direct mode)"
+			"must specify either --url <relay-url>, --listen <addr> with TLS config (server/direct mode), or --webrtc-listen <addr> (WebRTC direct mode)"
 		);
 	}
 

@@ -11,6 +11,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
+[features]
+tls = ["tokio-rustls", "rustls"]
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
@@ -20,3 +23,7 @@ thiserror = "1"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 str0m = "0.6"
+
+# Optional: TLS support for the signaling server.
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }

@@ -10,7 +10,8 @@
         "directory": "js/webrtc-boy"
     },
     "exports": {
-        ".": "./src/index.ts"
+        ".": "./src/index.ts",
+        "./input": "./src/input.ts"
     },
     "scripts": {
         "build": "rimraf dist && vite build && tsc",

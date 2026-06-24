@@ -71,25 +71,32 @@ export class SignalingClient {
         }
 
         const url = `${this.#baseUrl}/ice/${this.#sessionId}`;
+        console.log("WebRTC signaling: opening SSE", url);
         this.#eventSource = new EventSource(url);
 
+        this.#eventSource.onopen = () => {
+            console.log("WebRTC signaling: SSE connection opened");
+        };
+
         this.#eventSource.addEventListener("candidate", (event: MessageEvent) => {
+            console.log("WebRTC signaling: SSE candidate event, data length=", event.data.length);
             const data = JSON.parse(event.data);
             if (data.candidate) {
                 // Check for prefixed answer delivery (the server sends the
                 // SDP answer as a candidate with an "ANSWER:" prefix).
                 if (data.candidate.startsWith("ANSWER:")) {
                     const sdp = data.candidate.slice("ANSWER:".length);
-                    console.log("WebRTC signaling: received answer via SSE");
+                    console.log("WebRTC signaling: received answer via SSE, sdp length=", sdp.length);
                     onAnswer(sdp);
                 } else {
+                    console.log("WebRTC signaling: received ICE candidate via SSE");
                     onIce(data.candidate);
                 }
             }
         });
 
         this.#eventSource.onerror = () => {
-            console.warn("WebRTC signaling: SSE connection error, will retry");
+            console.warn("WebRTC signaling: SSE connection error, readyState=", this.#eventSource?.readyState);
         };
     }
 

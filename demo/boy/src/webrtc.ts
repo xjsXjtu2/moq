@@ -11,9 +11,34 @@ import { InputHandler, KEY_MAP } from "@moq/webrtc-boy/input";
 
 // --- Configuration ---
 
-// Priority: ?url= query param > default localhost
+// Priority: ?url= query param > vite proxy (same-origin, avoids mixed content)
 const params = new URLSearchParams(location.search);
-const baseUrl = params.get("url") ?? "http://localhost:8080";
+const urlParam = params.get("url");
+
+function resolveBaseUrl(raw: string): string {
+	const target = new URL(raw);
+	// If moq-boy is on localhost or the same host as the web server, use the
+	// vite proxy to avoid mixed-content blocking (page is HTTPS).
+	if (
+		target.hostname === "localhost" ||
+		target.hostname === "127.0.0.1" ||
+		target.hostname === location.hostname
+	) {
+		// Use TLS proxy when the target URL uses HTTPS, plain HTTP proxy otherwise.
+		return target.protocol === "https:" ? "/webrtc-proxy-tls" : "/webrtc-proxy";
+	}
+	// Remote access: connect directly (requires HTTPS on the signaling server).
+	return `${target.origin}/webrtc`;
+}
+
+let baseUrl: string;
+if (urlParam) {
+	baseUrl = resolveBaseUrl(urlParam);
+} else {
+	// Default: use the vite proxy, which forwards to localhost:8080.
+	// This avoids mixed-content blocking when the page is served over HTTPS.
+	baseUrl = "/webrtc-proxy";
+}
 
 const stunServer = params.get("stun") ?? undefined;
 
@@ -26,7 +51,7 @@ const actionRow = document.getElementById("action-row")!;
 // --- WebRTC Connection ---
 
 const peer = new WebrtcPeer({
-    signaling: { baseUrl: `${baseUrl.replace(/\/$/, "")}/webrtc` },
+    signaling: { baseUrl },
     stunServer,
 });
 

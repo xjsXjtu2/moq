@@ -36,6 +36,7 @@
 		"js/watch",
 		"js/publish",
 		"js/signals",
+		"js/webrtc-boy",
 		"demo/boy",
 		"demo/web",
 		"js/moq-boy"

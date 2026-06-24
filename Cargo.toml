@@ -63,7 +63,9 @@ moq-webrtc = { version = "0.1", path = "rs/moq-webrtc" }
 qmux = { version = "0.0.8", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
+rustls = "0.23"
 tokio = "1.48"
+tokio-rustls = "0.26"
 web-async = { version = "0.1.3", features = ["tracing"] }
 web-transport-iroh = "0.5"
 web-transport-noq = "0.1.1"

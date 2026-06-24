@@ -17,6 +17,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::{broadcast, Mutex};
 
+#[cfg(feature = "tls")]
+use tokio_rustls::TlsAcceptor;
+
 /// A single pending WebRTC session tracked by the signaling server.
 struct PeerSession {
     /// Channel for sending server ICE candidates to the client via SSE.
@@ -82,18 +85,76 @@ impl SignalingServer {
         }
     }
 
+    /// Start the TLS signaling server, binding to `addr`.
+    ///
+    /// Wraps each TCP connection with TLS before handing off to the HTTP handler.
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls(
+        self: Arc<Self>,
+        addr: SocketAddr,
+        acceptor: TlsAcceptor,
+    ) -> Result<()> {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .context("failed to bind signaling server")?;
+
+        tracing::info!(%addr, "WebRTC signaling server listening (TLS)");
+
+        loop {
+            let (stream, peer) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::warn!(error = %e, "signaling accept error");
+                    continue;
+                }
+            };
+
+            let this = self.clone();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => {
+                        if let Err(e) = this.handle_connection(tls_stream).await {
+                            tracing::debug!(%peer, error = %e, "signaling connection error");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(%peer, error = %e, "TLS handshake failed");
+                    }
+                }
+            });
+        }
+    }
+
     /// Push a server ICE candidate to the client via the SSE channel.
     pub async fn push_ice(&self, session_id: &str, candidate: &str) {
         let sessions = self.sessions.lock().await;
         if let Some(session) = sessions.get(session_id) {
-            let _ = session.ice_tx.send(candidate.to_string());
+            let receiver_count = session.ice_tx.receiver_count();
+            let is_answer = candidate.starts_with("ANSWER:");
+            tracing::info!(
+                %session_id,
+                %receiver_count,
+                candidate_len = candidate.len(),
+                is_answer,
+                "push_ice: sending to SSE channel"
+            );
+            match session.ice_tx.send(candidate.to_string()) {
+                Ok(n) => tracing::debug!(%session_id, receivers = n, "push_ice: sent"),
+                Err(e) => tracing::warn!(%session_id, error = %e, "push_ice: send failed (no receivers?)"),
+            }
+        } else {
+            tracing::warn!(%session_id, "push_ice: session not found");
         }
     }
 
-    async fn handle_connection(&self, mut stream: tokio::net::TcpStream) -> Result<()> {
+    async fn handle_connection<S>(&self, stream: S) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-        let (reader, mut writer) = stream.split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
 
         // Read the request line.
@@ -125,6 +186,19 @@ impl SignalingServer {
             }
         }
 
+        // Handle SSE (Server-Sent Events) for GET /webrtc/ice/:id.
+        if method == "GET" {
+            if let Some(session_id) = path.strip_prefix("/webrtc/ice/") {
+                drop(reader);
+                return self.handle_sse(session_id, writer).await;
+            }
+            // Other GET requests are not supported.
+            let response = http_response(404, "Not Found", "text/plain");
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+            return Ok(());
+        }
+
         // Read body.
         let mut body = vec![0u8; content_length];
         if content_length > 0 {
@@ -137,6 +211,75 @@ impl SignalingServer {
         writer.write_all(response.as_bytes()).await?;
         writer.shutdown().await?;
 
+        Ok(())
+    }
+
+    /// Stream server ICE candidates to the client via Server-Sent Events.
+    async fn handle_sse<W>(&self, session_id: &str, mut writer: W) -> Result<()>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::AsyncWriteExt;
+
+        // Subscribe to the session's ICE broadcast channel.
+        let mut rx = {
+            let sessions = self.sessions.lock().await;
+            match sessions.get(session_id) {
+                Some(session) => {
+                    tracing::info!(%session_id, "SSE: session found, subscribing to ICE channel");
+                    session.ice_tx.subscribe()
+                }
+                None => {
+                    tracing::warn!(%session_id, "SSE: session not found");
+                    writer
+                        .write_all(
+                            http_response(404, "Session not found", "text/plain").as_bytes(),
+                        )
+                        .await?;
+                    writer.shutdown().await?;
+                    return Ok(());
+                }
+            }
+        };
+
+        // Write SSE headers.
+        writer
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Cache-Control: no-cache\r\n\
+                  Connection: keep-alive\r\n\
+                  Access-Control-Allow-Origin: *\r\n\
+                  \r\n",
+            )
+            .await?;
+        tracing::info!(%session_id, "SSE: headers sent, waiting for events");
+
+        // Stream data as SSE "candidate" events.
+        loop {
+            match rx.recv().await {
+                Ok(candidate) => {
+                    let is_answer = candidate.starts_with("ANSWER:");
+                    tracing::info!(%session_id, candidate_len = candidate.len(), is_answer, "SSE: sending event");
+                    let data = serde_json::json!({ "candidate": candidate });
+                    let event = format!("event: candidate\ndata: {}\n\n", data);
+                    if writer.write_all(event.as_bytes()).await.is_err() {
+                        tracing::info!(%session_id, "SSE: client disconnected");
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(%session_id, skipped = n, "SSE: lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!(%session_id, "SSE: channel closed");
+                    break;
+                }
+            }
+        }
+
+        writer.shutdown().await?;
         Ok(())
     }
 
