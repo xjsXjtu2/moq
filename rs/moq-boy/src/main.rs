@@ -59,6 +59,9 @@ mod stats;
 mod status;
 mod video;
 
+#[cfg(feature = "webrtc")]
+mod webrtc;
+
 #[derive(Parser, Clone)]
 pub struct Config {
 	/// Connect to the given relay URL (relay mode). Mutually exclusive with --listen.
@@ -110,6 +113,25 @@ pub struct Config {
 	/// auto (encoder derives a sane value from resolution and framerate).
 	#[arg(long, short = 'b')]
 	pub bitrate: Option<u64>,
+
+	/// Enable WebRTC direct mode: listen for WebRTC peer connections with
+	/// HTTP signaling on this address (e.g. 0.0.0.0:8080).
+	#[cfg(feature = "webrtc")]
+	#[arg(long)]
+	pub webrtc_listen: Option<SocketAddr>,
+
+	/// STUN server URL for WebRTC ICE candidate gathering (optional).
+	/// Example: stun:stun.l.google.com:19302
+	#[cfg(feature = "webrtc")]
+	#[arg(long)]
+	pub stun_server: Option<String>,
+}
+
+impl Config {
+	/// Provide a default location for status (used in WebRTC mode).
+	pub fn location_default() -> Option<String> {
+		None
+	}
 }
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
@@ -281,11 +303,19 @@ async fn run(config: &Config) -> Result<()> {
 
 	let viewer_path = format!("{viewer_prefix}/{name}");
 
-	// Set up catalog and encoders (shared between both modes).
+	// Set up catalog and encoders (shared between all modes).
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+
+	// Enable WebRTC tap on the video encoder when in WebRTC mode.
+	#[cfg(feature = "webrtc")]
+	let webrtc_tap = config.webrtc_listen.is_some();
+	#[cfg(not(feature = "webrtc"))]
+	let webrtc_tap = false;
+
 	let enc_config = video::EncoderConfig {
 		framerate: config.framerate,
 		bitrate: config.bitrate.map(|kbps| kbps * 1000),
+		webrtc_tap,
 	};
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone(), enc_config);
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
@@ -347,6 +377,23 @@ async fn run(config: &Config) -> Result<()> {
 				}
 			}
 		});
+	}
+
+	// Dispatch to the appropriate mode: WebRTC > Relay > Server.
+	#[cfg(feature = "webrtc")]
+	if let Some(addr) = config.webrtc_listen {
+		return webrtc::run_webrtc_mode(
+			config,
+			&name,
+			&rom_path,
+			session,
+			cmd_tx,
+			cmd_rx,
+			audio_encoder,
+			status_publisher,
+			addr,
+		)
+		.await;
 	}
 
 	if let Some(url) = &config.url {

@@ -20,6 +20,8 @@ pub struct EncoderConfig {
 	pub framerate: u32,
 	/// Target bitrate in bits per second. None = auto.
 	pub bitrate: Option<u64>,
+	/// When true, tap encoded NAL units to a broadcast channel for WebRTC consumers.
+	pub webrtc_tap: bool,
 }
 
 impl Default for EncoderConfig {
@@ -27,8 +29,22 @@ impl Default for EncoderConfig {
 		Self {
 			framerate: 60,
 			bitrate: None,
+			webrtc_tap: false,
 		}
 	}
+}
+
+/// A single encoded frame's data, sent over the WebRTC tap channel.
+#[derive(Clone)]
+pub struct EncodedFrame {
+	/// The H.264 NAL units (Annex-B start codes stripped).
+	pub nals: Vec<Bytes>,
+	/// Emulator timestamp for this frame, in microseconds.
+	pub ts_us: u64,
+	/// Whether this frame is a keyframe (IDR).
+	pub is_keyframe: bool,
+	/// Approximate encode duration in microseconds for latency tracking.
+	pub encode_us: u64,
 }
 
 /// Handle to the video encoding thread.
@@ -47,6 +63,8 @@ pub struct VideoEncoder {
 	bytes_encoded: Arc<AtomicU64>,
 	/// Total keyframes emitted.
 	keyframes_encoded: Arc<AtomicU64>,
+	/// WebRTC tap: broadcast channel sender for encoded frames (optional).
+	webrtc_tx: Option<tokio::sync::broadcast::Sender<EncodedFrame>>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -75,9 +93,19 @@ impl VideoEncoder {
 		let fe = frames_encoded.clone();
 		let be = bytes_encoded.clone();
 		let ke = keyframes_encoded.clone();
+
+		// Create the WebRTC tap channel if requested.
+		let webrtc_tx = if enc.webrtc_tap {
+			let (tx, _) = tokio::sync::broadcast::channel::<EncodedFrame>(8);
+			Some(tx)
+		} else {
+			None
+		};
+		let webrtc_tx_clone = webrtc_tx.clone();
+
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, enc, fk, ed, fe, be, ke))
+			.spawn(move || encoder_thread(rx, producer, enc, fk, ed, fe, be, ke, webrtc_tx_clone))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -88,6 +116,7 @@ impl VideoEncoder {
 			frames_encoded,
 			bytes_encoded,
 			keyframes_encoded,
+			webrtc_tx,
 			_thread: thread,
 		}
 	}
@@ -125,6 +154,18 @@ impl VideoEncoder {
 	pub(crate) fn keyframes_encoded(&self) -> Arc<AtomicU64> {
 		self.keyframes_encoded.clone()
 	}
+
+	/// Subscribe to encoded H.264 frames via broadcast channel (WebRTC mode).
+	///
+	/// Returns `None` if the WebRTC tap was not enabled at construction time.
+	pub fn webrtc_subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<EncodedFrame>> {
+		self.webrtc_tx.as_ref().map(|tx| tx.subscribe())
+	}
+
+	/// Return a clone of the WebRTC tap sender, for creating new subscriptions later.
+	pub fn webrtc_tap(&self) -> Option<tokio::sync::broadcast::Sender<EncodedFrame>> {
+		self.webrtc_tx.clone()
+	}
 }
 
 fn encoder_thread(
@@ -136,6 +177,7 @@ fn encoder_thread(
 	frames_encoded: Arc<AtomicU64>,
 	bytes_encoded: Arc<AtomicU64>,
 	keyframes_encoded: Arc<AtomicU64>,
+	webrtc_tx: Option<tokio::sync::broadcast::Sender<EncodedFrame>>,
 ) {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
@@ -158,17 +200,31 @@ fn encoder_thread(
 			}
 		};
 
-		let keyframe: bool = force_keyframe.swap(false, Ordering::AcqRel);
+		let is_keyframe: bool = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match e.encode_rgba(&msg.rgba, WIDTH, HEIGHT, keyframe) {
+		match e.encode_rgba(&msg.rgba, WIDTH, HEIGHT, is_keyframe) {
 			Ok(packets) => {
+				let encode_us = start.elapsed().as_micros() as u64;
 				let byte_count: u64 = packets.iter().map(|p| p.len() as u64).sum();
-				if let Err(e) = producer.publish(packets, msg.ts) {
+				if let Err(e) = producer.publish(packets.clone(), msg.ts) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");
 					return;
 				}
+
+				// Tap encoded frame to the WebRTC broadcast channel.
+				if let Some(ref tx) = webrtc_tx {
+					let frame = EncodedFrame {
+						nals: packets,
+						ts_us: msg.ts.as_micros() as u64,
+						is_keyframe,
+						encode_us,
+					};
+					// Ignore send errors: no WebRTC subscribers is fine.
+					let _ = tx.send(frame);
+				}
+
 				frames_encoded.fetch_add(1, Ordering::Relaxed);
 				bytes_encoded.fetch_add(byte_count, Ordering::Relaxed);
 				keyframes_encoded.store(e.keyframe_count(), Ordering::Relaxed);

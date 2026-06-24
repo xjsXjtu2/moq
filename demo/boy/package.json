@@ -9,7 +9,8 @@
 		"dev": "vite --open"
 	},
 	"dependencies": {
-		"@moq/boy": "workspace:^"
+		"@moq/boy": "workspace:^",
+		"@moq/webrtc-boy": "workspace:^"
 	},
 	"devDependencies": {
 		"@vitejs/plugin-basic-ssl": "^2.3.0",

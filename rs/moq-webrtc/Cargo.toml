@@ -1,0 +1,22 @@
+[package]
+name = "moq-webrtc"
+description = "WebRTC transport layer for MoQ — H.264 / Opus RTP packetization and peer management"
+authors = ["MoQ Developers"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+keywords = ["moq", "webrtc", "rtp", "h264", "opus"]
+categories = ["multimedia::video", "network-programming", "web-programming::websocket"]
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+bytes = "1"
+serde = { workspace = true }
+serde_json = "1"
+thiserror = "1"
+tokio = { workspace = true, features = ["full"] }
+tracing = "0.1"
+str0m = "0.6"

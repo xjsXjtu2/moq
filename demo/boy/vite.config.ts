@@ -49,6 +49,7 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				main: resolve(__dirname, "src/index.html"),
+				webrtc: resolve(__dirname, "src/webrtc.html"),
 			},
 		},
 	},
@@ -68,6 +69,13 @@ export default defineConfig({
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
 			},
+			// Proxy WebRTC signaling requests to moq-boy's WebRTC HTTP server.
+			// The default WebRTC mode listens on port 8080.
+			"/webrtc-proxy": {
+				target: "http://localhost:8080",
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/webrtc-proxy/, ""),
+			},
 		},
 	},
 	optimizeDeps: {
@@ -85,6 +93,12 @@ export default defineConfig({
 				target: "http://localhost:4443",
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/cert-proxy/, ""),
+			},
+			// Proxy WebRTC signaling requests to moq-boy's WebRTC HTTP server.
+			"/webrtc-proxy": {
+				target: "http://localhost:8080",
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/webrtc-proxy/, ""),
 			},
 		},
 	},

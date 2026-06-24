@@ -225,6 +225,7 @@ export class Connection implements Established {
 	 * Handles unidirectional streams for media delivery (groups).
 	 */
 	async #runUnis() {
+		console.log(`xjsdbg ietf quic conn`);
 		const readers = new Readers(this.#quic, this.#session.version);
 
 		for (;;) {

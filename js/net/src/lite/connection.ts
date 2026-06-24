@@ -195,6 +195,7 @@ export class Connection implements Established {
 	}
 
 	async #runUnis() {
+		console.log(`xjsdbg lite quic conn`);
 		const readers = new Readers(this.#quic);
 
 		for (;;) {

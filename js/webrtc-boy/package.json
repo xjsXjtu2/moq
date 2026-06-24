@@ -1,0 +1,24 @@
+{
+    "name": "@moq/webrtc-boy",
+    "type": "module",
+    "version": "0.1.0",
+    "description": "MoQ Boy WebRTC client — direct WebRTC connection for Game Boy cloud gaming",
+    "license": "(MIT OR Apache-2.0)",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/moq-dev/moq",
+        "directory": "js/webrtc-boy"
+    },
+    "exports": {
+        ".": "./src/index.ts"
+    },
+    "scripts": {
+        "build": "rimraf dist && vite build && tsc",
+        "check": "tsc --noEmit"
+    },
+    "devDependencies": {
+        "typescript": "^6.0.3",
+        "vite": "^8.0.14",
+        "rimraf": "^6.1.3"
+    }
+}

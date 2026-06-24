@@ -116,6 +116,7 @@ export class SharedRingBuffer {
 		const gap = (start - write) | 0;
 		if (gap > 0) {
 			const gapSize = Math.min(gap, this.capacity);
+			console.warn(`xjsdbg audio gap fill size:${gapSize}`);
 			for (let channel = 0; channel < this.channels; channel++) {
 				const dst = this.#samples[channel];
 				for (let i = 0; i < gapSize; i++) {
