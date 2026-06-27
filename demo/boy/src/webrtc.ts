@@ -73,6 +73,20 @@ const peer = new WebrtcPeer({
 peer.onTrack = (stream) => {
     video.srcObject = stream;
     statusEl.textContent = "Playing (WebRTC)";
+    // Muted autoplay: Chrome requires muted for autoplay without user gesture.
+    video.muted = true;
+    video.play().catch((e) => console.warn("video.play() failed:", e));
+    // First click/tap on the video unmutes (browser policy: audio needs user gesture).
+    const unmuteOnFirstClick = () => {
+        if (video.muted) {
+            video.muted = false;
+            const unmuteBtn = document.getElementById("btn-unmute");
+            if (unmuteBtn) unmuteBtn.textContent = "🔊 Mute";
+        }
+    };
+    video.addEventListener("click", unmuteOnFirstClick, { once: true });
+    // Also unmute on first keydown (keyboard players).
+    document.addEventListener("keydown", unmuteOnFirstClick, { once: true });
 };
 
 peer.onStateChange = (state) => {
@@ -83,7 +97,6 @@ peer.onStateChange = (state) => {
         controlsEl.style.display = "";
         actionRow.style.display = "";
         statsPanel.style.display = "";
-        video.muted = false;
         stopStats = startStatsPolling();
     } else if (state === "disconnected" || state === "failed") {
         statusEl.textContent = `WebRTC: ${state} — reconnecting...`;

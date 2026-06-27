@@ -108,11 +108,15 @@ export class WebrtcPeer {
         // through the same <video> element, we build our own MediaStream
         // that collects every track regardless of which stream it arrives on.
         const remoteStream = new MediaStream();
+        let onTrackCalled = false;
 
         this.#pc.ontrack = (event: RTCTrackEvent) => {
             console.log("WebRTC ontrack:", event.track.kind, event.track.id);
             remoteStream.addTrack(event.track);
-            this.onTrack?.(remoteStream);
+            if (!onTrackCalled) {
+                onTrackCalled = true;
+                this.onTrack?.(remoteStream);
+            }
         };
 
         // Configure transceivers for receiving video and audio.
