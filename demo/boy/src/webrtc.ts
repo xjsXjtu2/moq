@@ -52,6 +52,16 @@ const sJitter = document.getElementById("s-jitter")!;
 const sDecode = document.getElementById("s-decode")!;
 const sEncode = document.getElementById("s-encode")!;
 const sRtt = document.getElementById("s-rtt")!;
+const sCapren = document.getElementById("s-capren")!;
+const sTotal = document.getElementById("s-total")!;
+
+// Running values for total latency computation.
+let latencyJitter = 0;
+let latencyDecode = 0;
+let latencyEncode = 0;
+let latencyCapren = 0;
+let latencyRtt = 0;
+const latencyOthers = 10; // fixed: OS/encoder pipeline/etc overhead
 
 // --- WebRTC Connection ---
 
@@ -84,8 +94,9 @@ peer.onStateChange = (state) => {
 // Server-pushed status (encode time) arrives via DataChannel onmessage.
 peer.onStatus = (status) => {
     if (typeof status.encode_ms === "number") {
-        sEncode.textContent = `${status.encode_ms}ms`;
-        colorizeLatency(sEncode, status.encode_ms);
+        latencyEncode = status.encode_ms;
+        sEncode.textContent = `${latencyEncode}ms`;
+        colorizeLatency(sEncode, latencyEncode, 5, 15);
     }
     if (typeof status.video_fps === "number") {
         sFps.textContent = `${status.video_fps.toFixed(0)} fps`;
@@ -206,31 +217,45 @@ async function pollStats() {
             const pli = videoInbound.pliCount ?? 0;
             sNack.textContent = `${nack} / ${pli}`;
 
-            // Jitter buffer delay (ms) — average over last second
+            // Jitter buffer delay (ms)
             if (typeof videoInbound.jitterBufferDelay === "number" &&
                 typeof videoInbound.jitterBufferEmittedCount === "number" &&
                 videoInbound.jitterBufferEmittedCount > 0) {
-                const jitterMs = (videoInbound.jitterBufferDelay / videoInbound.jitterBufferEmittedCount) * 1000;
-                sJitter.textContent = `${jitterMs.toFixed(1)}ms`;
-                colorizeLatency(sJitter, jitterMs, 30, 80);
+                latencyJitter = (videoInbound.jitterBufferDelay / videoInbound.jitterBufferEmittedCount) * 1000;
+                sJitter.textContent = `${latencyJitter.toFixed(1)}ms`;
+                colorizeLatency(sJitter, latencyJitter, 30, 80);
             }
 
-            // Decode time (ms) — average per frame
+            // Decode time (ms)
             if (typeof videoInbound.totalDecodeTime === "number" &&
                 typeof videoInbound.framesDecoded === "number" &&
                 videoInbound.framesDecoded > 0) {
-                const decodeMs = (videoInbound.totalDecodeTime / videoInbound.framesDecoded) * 1000;
-                sDecode.textContent = `${decodeMs.toFixed(1)}ms`;
-                colorizeLatency(sDecode, decodeMs, 5, 15);
+                latencyDecode = (videoInbound.totalDecodeTime / videoInbound.framesDecoded) * 1000;
+                sDecode.textContent = `${latencyDecode.toFixed(1)}ms`;
+                colorizeLatency(sDecode, latencyDecode, 5, 15);
+            }
+
+            // cap_ren(est): capture + render estimate.
+            // Both are periodic triggers. Each has an expected wait of 1/(2*fps),
+            // so combined = 1/fps = 1000/fps milliseconds.
+            if (typeof videoInbound.framesPerSecond === "number" && videoInbound.framesPerSecond > 0) {
+                latencyCapren = 1000 / videoInbound.framesPerSecond;
+                sCapren.textContent = `${latencyCapren.toFixed(1)}ms`;
+                colorizeLatency(sCapren, latencyCapren, 17, 34);
             }
         }
 
         // RTT from the candidate pair
         if (candidatePair && typeof candidatePair.currentRoundTripTime === "number") {
-            const rttMs = candidatePair.currentRoundTripTime * 1000;
-            sRtt.textContent = `${rttMs.toFixed(1)}ms`;
-            colorizeLatency(sRtt, rttMs, 50, 150);
+            latencyRtt = candidatePair.currentRoundTripTime * 1000;
+            sRtt.textContent = `${latencyRtt.toFixed(1)}ms`;
+            colorizeLatency(sRtt, latencyRtt, 50, 150);
         }
+
+        // Total latency estimate
+        const total = latencyJitter + latencyDecode + latencyEncode + latencyCapren + latencyRtt + latencyOthers;
+        sTotal.textContent = total > 0 ? `${total.toFixed(0)}ms` : "--";
+        colorizeLatency(sTotal, total, 80, 200);
     } catch (err) {
         // getStats() can throw during connection teardown — ignore.
     }
