@@ -4,7 +4,7 @@
 //!
 //! - **Relay mode** (`--url`): connects to a relay server; viewers also connect
 //!   via the same relay. Pause/resume is driven by per-track subscription monitoring.
-//! - **Server mode** (`--listen`): the emulator acts as a WebTransport server;
+//! - **Server mode** (`--moq-listen`): the emulator acts as a WebTransport server;
 //!   viewers connect directly. Pause/resume is driven by session count.
 //!
 //! Architecture:
@@ -64,7 +64,7 @@ mod webrtc;
 
 #[derive(Parser, Clone)]
 pub struct Config {
-	/// Connect to the given relay URL (relay mode). Mutually exclusive with --listen.
+	/// Connect to the given relay URL (relay mode). Mutually exclusive with --moq-listen.
 	#[arg(long, conflicts_with = "server-bind")]
 	pub url: Option<Url>,
 
@@ -97,7 +97,7 @@ pub struct Config {
 	pub client: moq_native::ClientConfig,
 
 	/// The MoQ server configuration (used in server/direct mode).
-	/// Use --listen to specify the bind address (e.g. 0.0.0.0:4443).
+	/// Use --moq-listen to specify the bind address (e.g. 0.0.0.0:4443).
 	#[command(flatten)]
 	pub server: moq_native::ServerConfig,
 
@@ -408,9 +408,34 @@ async fn run(config: &Config) -> Result<()> {
 		});
 	}
 
-	// Dispatch to the appropriate mode: WebRTC > Relay > Server.
+	// Dispatch to the appropriate mode.
 	#[cfg(feature = "webrtc")]
 	if let Some(addr) = config.webrtc_listen {
+		// Check if MoQ direct server is also requested (--moq-listen with TLS).
+		let moq_enabled = config.server.bind.is_some()
+			|| !config.server.tls.generate.is_empty()
+			|| !config.server.tls.cert.is_empty();
+
+		if moq_enabled {
+			// Hybrid mode: WebRTC + MoQ direct server, same emulator.
+			return webrtc::run_hybrid_mode(
+				config,
+				&name,
+				&rom_path,
+				&broadcast_path,
+				&viewer_path,
+				session,
+				cmd_tx,
+				cmd_rx,
+				audio_encoder,
+				status_publisher,
+				publish_origin,
+				addr,
+				audio_rx,
+			)
+			.await;
+		}
+
 		return webrtc::run_webrtc_mode(
 			config,
 			&name,
@@ -913,7 +938,7 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
-	// Validate: need at least one of --url, --listen (server-bind), or --webrtc-listen.
+	// Validate: need at least one of --url, --moq-listen, or --webrtc-listen.
 	#[cfg(feature = "webrtc")]
 	let has_webrtc = config.webrtc_listen.is_some();
 	#[cfg(not(feature = "webrtc"))]
@@ -925,7 +950,7 @@ async fn main() -> Result<()> {
 		&& !has_webrtc
 	{
 		anyhow::bail!(
-			"must specify either --url <relay-url>, --listen <addr> with TLS config (server/direct mode), or --webrtc-listen <addr> (WebRTC direct mode)"
+			"must specify either --url <relay-url>, --moq-listen <addr> with TLS config (server/direct mode), or --webrtc-listen <addr> (WebRTC direct mode)"
 		);
 	}
 

@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-native = { workspace = true, default-features = false, features = ["ring"] }
 moq-net = { workspace = true }
 moq-video = { workspace = true }
 moq-webrtc = { workspace = true, optional = true }

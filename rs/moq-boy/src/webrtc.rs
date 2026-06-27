@@ -27,7 +27,7 @@ use tokio::net::UdpSocket;
 
 use crate::audio::{self, AudioEncoder};
 use crate::emulator::{self, Emulator};
-use crate::input::Command;
+use crate::input::{self, Command};
 use crate::stats::Stats;
 use crate::status::{self, StatusPublisher};
 use crate::video::EncodedFrame;
@@ -421,13 +421,16 @@ fn run_emulator_webrtc(
     let mut log_prev_audio: u64 = audio_packets.load(std::sync::atomic::Ordering::Relaxed);
 
     loop {
-        // Pause when no peers are connected.
+        // Pause when no peers/consumers are connected.
+        // In hybrid mode, also check MoQ track subscribers (Session flags).
         let is_video = webrtc_session
             .video_active
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || session.video_active.load(std::sync::atomic::Ordering::Relaxed);
         let is_audio = webrtc_session
             .audio_active
-            .load(std::sync::atomic::Ordering::Relaxed);
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || session.audio_active.load(std::sync::atomic::Ordering::Relaxed);
 
         if !is_video && !is_audio {
             tokio::task::block_in_place(|| {
@@ -658,6 +661,115 @@ async fn dispatch_audio_to_peers(
             }
         }
     }
+}
+
+/// Hybrid mode: WebRTC direct connections + MoQ direct server, one emulator.
+///
+/// Both WebRTC and MoQ clients connect to the same game session. Video/audio
+/// encoding is shared; commands from both transports merge into the same
+/// channel. The emulator pauses only when ALL transports have no viewers.
+pub async fn run_hybrid_mode(
+    config: &crate::Config,
+    name: &str,
+    rom_path: &std::path::Path,
+    broadcast_path: &str,
+    viewer_path: &str,
+    session: Arc<crate::Session>,
+    cmd_tx: tokio::sync::mpsc::Sender<Command>,
+    cmd_rx: tokio::sync::mpsc::Receiver<Command>,
+    audio_encoder: AudioEncoder,
+    status_publisher: StatusPublisher,
+    publish_origin: moq_net::OriginProducer,
+    addr: SocketAddr,
+    audio_rx: Option<tokio::sync::broadcast::Receiver<audio::EncodedAudio>>,
+) -> Result<()> {
+    // --- MoQ direct server setup ---
+
+    let server_config = config.server.clone();
+    let mut server = server_config.init().context("failed to initialize MoQ server")?;
+    let moq_addr = server.local_addr()?;
+    tracing::info!(%moq_addr, %name, broadcast = %broadcast_path, "MoQ server listening (hybrid mode)");
+
+    let tls_info = server.tls_info();
+    tokio::spawn(crate::serve_certificate_fingerprint(moq_addr, tls_info));
+
+    server = server.with_publish(publish_origin.consume());
+
+    // MoQ track monitors for pause/resume (set session.video_active/audio_active).
+    let s = session.clone();
+    tokio::spawn(async move { s.run_track_monitor("video", &s.video_track, &s.video_active).await });
+    let s = session.clone();
+    tokio::spawn(async move { s.run_track_monitor("audio", &s.audio_track, &s.audio_active).await });
+
+    // --- MoQ accept loop (spawned as background task) ---
+
+    let moq_cmd_tx = cmd_tx.clone();
+    let moq_session = session.clone();
+    let viewer_path_owned = viewer_path.to_string();
+    let moq_publish = publish_origin.clone();
+    tokio::spawn(async move {
+        tracing::info!("MoQ accept loop started");
+        loop {
+            let Some(request) = server.accept().await else {
+                tracing::info!("MoQ server stopped accepting");
+                break;
+            };
+            let transport = request.transport();
+            tracing::info!(transport, "MoQ incoming connection (hybrid)");
+
+            let viewer_origin = moq_net::Origin::random().produce();
+            let viewer_consumer = match viewer_origin.with_root(&viewer_path_owned) {
+                Some(c) => c.consume(),
+                None => {
+                    tracing::warn!("invalid viewer path in hybrid mode");
+                    continue;
+                }
+            };
+
+            let cmd_tx = moq_cmd_tx.clone();
+            let session = moq_session.clone();
+            let game_publish = moq_publish.clone();
+
+            tokio::spawn(async move {
+                let moq_session = match request
+                    .with_publish(game_publish.consume())
+                    .with_consume(viewer_origin)
+                    .ok()
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "MoQ session handshake failed");
+                        return;
+                    }
+                };
+
+                tracing::info!(version = %moq_session.version(), transport, "MoQ session established (hybrid)");
+
+                session.session_count.fetch_add(1, std::sync::atomic::Ordering::Release);
+                let mut viewer_consumer = viewer_consumer;
+                let input_handle = tokio::spawn(async move {
+                    if let Err(e) = input::handle_viewers(&mut viewer_consumer, &cmd_tx).await {
+                        tracing::warn!(error = %e, "MoQ viewer input error");
+                    }
+                });
+
+                let _ = moq_session.closed().await;
+                input_handle.abort();
+                session.session_count.fetch_sub(1, std::sync::atomic::Ordering::Release);
+                tracing::info!("MoQ viewer disconnected (hybrid)");
+            });
+        }
+        anyhow::Ok(())
+    });
+
+    // --- WebRTC mode (same as run_webrtc_mode) ---
+
+    run_webrtc_mode(
+        config, name, rom_path, session,
+        cmd_tx, cmd_rx, audio_encoder, status_publisher,
+        addr, audio_rx,
+    ).await
 }
 
 /// Convert a WebRTC DataChannel command to the internal command type.
